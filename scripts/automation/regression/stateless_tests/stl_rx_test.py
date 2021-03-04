@@ -168,7 +168,7 @@ class STLRX_Test(CStlGeneral_Test):
         # skip mlx5 VF
         self.mlx5_defect_dpdk1711_3 = CTRexScenario.setup_name in ['trex23']
         self.i40e_vf_defect_github_200 = CTRexScenario.setup_name in ['trex22']
-        self.mlx5_defect_dpdk1711_trex_518 = CTRexScenario.setup_name in ['trex07']
+        self.mlx5_defect_dpdk1711_trex_518 = CTRexScenario.setup_name in ['trex19'] # issue 633 & 632
         #self.mlx5_defect_dpdk1711_3 =False
         if CTRexScenario.setup_name in ['dmz1']:
             self.rate_percent = 40
@@ -474,7 +474,7 @@ class STLRX_Test(CStlGeneral_Test):
 
     @try_few_times_on_vm
     def test_multiple_streams_random(self):
-        if CTRexScenario.setup_name in ['trex22']:
+        if CTRexScenario.setup_name in ['trex22', 'trex11']:
             self.skip('Skip not stable on this setup')
 
         if self.mlx5_defect_dpdk1711_trex_518:

@@ -2355,13 +2355,13 @@ inline void CFlowPktInfo::update_pkt_info(char *p,
         uint32_t ip_addr_offset = node->m_src_ip % m_pkt_indication.m_desc.GetMaxIpTunnels();
         if (unlikely(m_pkt_indication.m_is_ipv6_tunnel)) {
             IPv6Header* tunnel_ip = (IPv6Header*)(p + m_pkt_indication.m_tunnel_ip_offset);
-            tunnel_ip->updateLSBIpv6Src((uint32_t) tunnel_ip->mySource[6] + ip_addr_offset);
-            tunnel_ip->updateLSBIpv6Dst((uint32_t) tunnel_ip->myDestination[6] + ip_addr_offset);
+            tunnel_ip->updateLSBIpv6Src(PKT_NTOHL(*(uint32_t*)&tunnel_ip->mySource[6]) + ip_addr_offset);
+            tunnel_ip->updateLSBIpv6Dst(PKT_NTOHL(*(uint32_t*)&tunnel_ip->myDestination[6]) + ip_addr_offset);
         }
         else {
             IPHeader* tunnel_ip = (IPHeader*)(p + m_pkt_indication.m_tunnel_ip_offset);
-            tunnel_ip->updateIpSrc(tunnel_ip->mySource + ip_addr_offset);
-            tunnel_ip->updateIpDst(tunnel_ip->myDestination + ip_addr_offset);
+            tunnel_ip->updateIpSrc(PKT_NTOHL(tunnel_ip->mySource) + ip_addr_offset);
+            tunnel_ip->updateIpDst(PKT_NTOHL(tunnel_ip->myDestination) + ip_addr_offset);
         }
     }
     
@@ -3234,6 +3234,7 @@ private:
     std::map<uint32_t, CIpInfoBase*> m_ip_info;
 public:
     CIpInfoBase* get_ip_info(uint32_t ip);
+    CIpInfoBase* client_lookup(uint32_t ip);
     void allocate_ip_info(CIpInfoBase* ip_info);
     void release_ip_info(CIpInfoBase* ip_info);
 
@@ -3265,6 +3266,7 @@ private:
 
     TrexDpCore                      *m_dp_core; /* polymorphic DP core (stl/stf/astf) */
     bool                             m_terminated_by_master;
+    bool                             m_read_from_redirect_ring; // flag indicating from which ring to read in case of astf software rss mode.
 
 public:
     /* TCP stack memory */
@@ -3291,6 +3293,10 @@ public:
     void handle_rx_flush(CGenNode * node,bool on_terminate);
     void handle_tx_fif(CGenNodeTXFIF * node,bool on_terminate);
     void handle_tw(CGenNode * node,bool on_terminate);
+    uint16_t rx_burst_astf_software_rss_ring(pkt_dir_t dir, rte_mbuf_t** rx_pkts, uint16_t nb_pkts, bool redirect_ring);
+    uint16_t rx_burst_astf_software_rss(pkt_dir_t dir, rte_mbuf_t** rx_pkts, uint16_t nb_pkts);
+    bool handle_astf_software_rss(pkt_dir_t dir, rte_mbuf_t* mbuf, CTcpPerThreadCtx* ctx, tvpid_t port_id);
+    template<bool ASTF_SOFTWARE_RX> uint16_t handle_rx_pkts(bool is_idle);
     uint16_t handle_rx_pkts(bool is_idle);
 
 public:

@@ -865,39 +865,35 @@ void CPacketIndication::_ProcessPacket(CPacketParser *parser,
             break;
         case EthernetHeader::Protocol::MPLS_Multicast:
         case EthernetHeader::Protocol::MPLS_Unicast:
-            m_cnt->m_mpls++;
-            return;
+			break;
 
         case EthernetHeader::Protocol::ARP:
             m_cnt->m_arp++;
-            return;
+            break;
 
-        default:
-            m_cnt->m_non_ip++;
-            return; /* Non IP */
+        default:  
+			break;
         }
         break;
     case EthernetHeader::Protocol::ARP:
         m_cnt->m_arp++;
-        return; /* Non IP */
         break;
 
     case EthernetHeader::Protocol::MPLS_Multicast:
     case EthernetHeader::Protocol::MPLS_Unicast:
-        m_cnt->m_mpls++;
-        return; /* Non IP */
         break;
 
     default:
-        m_cnt->m_non_ip++;
-        return; /* Non IP */
+		break;
     }
-    if (parser->m_ip_header_offset != 0){
-        // Keep track of the tunnel IP header offset we found above
-        m_tunnel_ip_offset = offset;
-        offset = parser->m_ip_header_offset;
-        m_is_ipv6_tunnel = m_is_ipv6;
-        m_is_ipv6 = false;
+    if (parser->m_ip_header_offset != 0) {
+		if (offset != 0) {
+			// Keep track of the tunnel IP header offset we found above
+			m_tunnel_ip_offset = offset;
+			m_is_ipv6_tunnel = m_is_ipv6;
+			m_is_ipv6 = false;
+		}
+		offset = parser->m_ip_header_offset;
         uint8_t* ip_version = (uint8_t*)(packetBase + offset);
         if ((*ip_version & 0xF0) == 0x40){
             l3.m_ipv4 = (IPHeader*)(packetBase + offset);
@@ -911,6 +907,10 @@ void CPacketIndication::_ProcessPacket(CPacketParser *parser,
             exit(-1);
         }
     }
+	if (offset == 0) {
+		m_cnt->m_non_ip++;
+		return; /* Non IP */
+	}
 
     if (is_ipv6() == false) {
         if( (offset+20) > (uint32_t)( m_packet->getTotalLen())   ){
@@ -2960,6 +2960,7 @@ bool CFlowGenListPerThread::Create(uint32_t           thread_id,
     m_udp_dpc=0;
     m_max_threads=max_threads;
     m_thread_id=thread_id;
+    m_read_from_redirect_ring = false;
 
     m_c_tcp=0;
     m_s_tcp=0;
@@ -3120,14 +3121,22 @@ void CFlowGenListPerThread::defer_client_port_free(CGenNode *p){
 
 
 CIpInfoBase* CFlowGenListPerThread::get_ip_info(uint32_t ip){
+    CIpInfoBase *c_info = client_lookup(ip);
+    if (c_info)
+        c_info->inc_ref();
+        
+    return c_info;
+}
+
+CIpInfoBase* CFlowGenListPerThread::client_lookup(uint32_t ip){
     auto it = m_ip_info.find(ip);
     if (it == m_ip_info.end()) {
         return nullptr;
     } else {
-        it->second->inc_ref();
         return it->second;
     }
 }
+
 
 void CFlowGenListPerThread::allocate_ip_info(CIpInfoBase* ip_info) {
     uint32_t ip = ip_info->get_ip();
@@ -3141,6 +3150,7 @@ void CFlowGenListPerThread::allocate_ip_info(CIpInfoBase* ip_info) {
 void CFlowGenListPerThread::release_ip_info(CIpInfoBase* ip_info) {
     uint32_t ip = ip_info->get_ip();
     ip_info->dec_ref();
+
     if (ip_info->ref_cnt() == 0) {
         auto it = m_ip_info.find(ip);
         if (it != m_ip_info.end() && it->second == ip_info) {

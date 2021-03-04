@@ -25,7 +25,8 @@
 std::string CTRexExtendedDriverBaseMlnx5G::mlx5_so_str = "";
 
 CTRexExtendedDriverBaseMlnx5G::CTRexExtendedDriverBaseMlnx5G() {
-    m_cap = tdCAP_ALL | TREX_DRV_CAP_MAC_ADDR_CHG ;
+    //m_cap = tdCAP_MULTI_QUE | tdCAP_ONE_QUE  | TREX_DRV_CAP_MAC_ADDR_CHG ;
+    m_cap = tdCAP_ALL  | TREX_DRV_CAP_MAC_ADDR_CHG ;
     for ( int i=0; i<TREX_MAX_PORTS; i++ ) {
         m_port_xstats[i] = {0};
     }
@@ -80,20 +81,7 @@ int CTRexExtendedDriverBaseMlnx5G::get_rx_stats(CPhyEthIF * _if, uint32_t *pkts,
 
 int CTRexExtendedDriverBaseMlnx5G::dump_fdir_global_stats(CPhyEthIF * _if, FILE *fd)
 {
-    repid_t repid=_if->get_repid();
-    struct rte_eth_fdir_stats stat;
-    int ret;
-
-    ret = rte_eth_dev_filter_ctrl(repid, RTE_ETH_FILTER_FDIR, RTE_ETH_FILTER_STATS, (void*)&stat);
-    if (ret == 0) {
-        if (fd)
-            fprintf(fd, "Num filters on guarant poll:%d, best effort poll:%d\n", stat.guarant_cnt, stat.best_cnt);
-        return (stat.guarant_cnt + stat.best_cnt);
-    } else {
-        if (fd)
-            fprintf(fd, "Failed reading fdir statistics\n");
-        return -1;
-    }
+    return(0);
 }
 
 bool CTRexExtendedDriverBaseMlnx5G::get_extended_stats(CPhyEthIF * _if, CPhyEthIFStats *stats) {
@@ -134,20 +122,45 @@ bool CTRexExtendedDriverBaseMlnx5G::get_extended_stats(CPhyEthIF * _if, CPhyEthI
         tx_discards_phy,
         tx_errors_phy,
         rx_out_of_buffer,
+        //tx_pp_missed_interrupt_error,
+        //tx_pp_rearm_queue_errors,
+        //tx_pp_clock_queue_errors,    
+        //tx_pp_timestamp_past_errors,
+        //tx_pp_timestamp_future_error, 
+        //tx_pp_jitter,
+        //tx_pp_wander,
+        //tx_pp_sync_lost,
         XCOUNT
     };
 
     uint16_t repid = _if->get_repid();
     xstats_struct* xstats_struct = &m_port_xstats[repid];
 
+
+
+
     if ( !xstats_struct->init ) {
         // total_count = COUNT + per queue stats count + XCOUNT
         xstats_struct->total_count = rte_eth_xstats_get(repid, NULL, 0);
         assert(xstats_struct->total_count>=COUNT+XCOUNT);
+        struct rte_eth_xstat_name *xstats_names;
+
+    	xstats_names = (struct rte_eth_xstat_name *)malloc(sizeof(struct rte_eth_xstat_name) * xstats_struct->total_count);
+        assert(xstats_names!= 0);
+        rte_eth_xstats_get_names(repid,xstats_names,xstats_struct->total_count);
+        int i;
+
+        for (i=0; i<xstats_struct->total_count; i++){
+            if (strncmp(xstats_names[i].name,"rx_out_of_buffer",RTE_ETH_XSTATS_NAME_SIZE) == 0) { 
+                xstats_struct->last_offset = xstats_struct->total_count - 1 - i;
+                break;
+            }
+        }
+        free(xstats_names);
     }
 
     struct rte_eth_xstat xstats_array[xstats_struct->total_count];
-    struct rte_eth_xstat *xstats = &xstats_array[xstats_struct->total_count - XCOUNT];
+    struct rte_eth_xstat *xstats = &xstats_array[xstats_struct->total_count - XCOUNT - xstats_struct->last_offset];
     struct rte_eth_stats *prev_stats = &stats->m_prev_stats;
 
     /* fetch stats */

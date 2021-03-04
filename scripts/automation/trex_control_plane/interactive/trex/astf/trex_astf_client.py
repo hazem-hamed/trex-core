@@ -24,7 +24,6 @@ from ..utils.common import  is_valid_ipv4, is_valid_ipv6
 from ..utils.text_opts import format_text
 from ..astf.trex_astf_exceptions import ASTFErrorBadTG
 
-
 astf_states = [
     'STATE_IDLE',
     'STATE_ASTF_LOADED',
@@ -33,6 +32,11 @@ astf_states = [
     'STATE_TX',
     'STATE_ASTF_CLEANUP',
     'STATE_ASTF_DELETE']
+
+class TunnelType:
+      NONE = 0
+      GTP  = 1
+      
 
 class ASTFClient(TRexClient):
     port_states = [getattr(ASTFPort, state, 0) for state in astf_states]
@@ -79,7 +83,7 @@ class ASTFClient(TRexClient):
 
         """
 
-        api_ver = {'name': 'ASTF', 'major': 1, 'minor': 9}
+        api_ver = {'name': 'ASTF', 'major': 2, 'minor': 0}
 
         TRexClient.__init__(self,
                             api_ver,
@@ -424,7 +428,9 @@ class ASTFClient(TRexClient):
             self.ctx.logger.pre_cmd('Acquiring ports %s:' % ports)
 
         params = {'force': force,
-                  'user':  self.ctx.username}
+                  'user':  self.ctx.username,
+                  'session_id':  self.ctx.session_id}
+
         rc = self._transmit('acquire', params)
         self.ctx.logger.post_cmd(rc)
         if not rc:
@@ -556,6 +562,11 @@ class ASTFClient(TRexClient):
             except Exception as e:
                 self.astf_profile_state.pop(pid_input, None)
                 raise TRexError('Could not load profile: %s' % e)
+
+            #when ".. -t --help", is called then return
+            if profile is None:
+                return
+
         profile_json = profile.to_json_str(pretty = False, sort_keys = True)
 
         self.ctx.logger.pre_cmd('Loading traffic at acquired ports.')
@@ -1164,6 +1175,104 @@ class ASTFClient(TRexClient):
 
         self.ctx.logger.post_cmd(True)
 
+    # private function to form json data for GTP tunnel
+    def _update_gtp_tunnel(self, client_list):
+
+        json_attr = []
+
+        for key, value in client_list.items():
+            json_attr.append({'client_ip' : key, 'sip': value.sip, 'dip' : value.dip, 'teid' : value.teid, "version" :value.version})
+ 
+        return json_attr
+
+    # execute 'method' for inserting/updateing tunnel info for clients
+    def update_tunnel_client_record (self, client_list, tunnel_type):
+
+        json_attr = []
+        
+        if tunnel_type == TunnelType.GTP:
+           json_attr = self._update_gtp_tunnel(client_list)
+        else:
+           raise TRexError('Invalid Tunnel Type: %d' % tunnel_type)
+        
+        params = {"tunnel_type": tunnel_type,
+                  "attr": json_attr }
+
+        return self._transmit("update_tunnel_client", params)
+
+    # execute 'method' for Making  a client active/inactive
+    def set_client_enable(self, client_list, is_enable):
+        '''
+        Version: 1 
+        API to toggle state of client
+        Input: List of clients and Action : state flag
+        '''
+
+        json_attr = []
+        for key in client_list:
+           json_attr.append({'client_ip' : key})
+ 
+        params = {"is_enable": is_enable,
+                  "is_range": False,
+                  "attr": json_attr }
+
+        return self._transmit("enable_disable_client", params)
+
+
+    # execute 'method' for Making  a client active/inactive
+    def set_client_enable_range(self, client_start, client_end, is_enable):
+        ''' 
+        Version: 2
+        API to toggle state of client
+        Input: Client range and Action : state flag
+        '''
+
+        json_attr = []
+        json_attr.append({'client_start_ip' : client_start, 'client_end_ip' : client_end})
+ 
+        params = {"is_enable": is_enable,
+                  "is_range": True,
+                  "attr": json_attr }
+
+        return self._transmit("enable_disable_client", params)
+
+
+     # execute 'method' for getting clients stats
+    def get_clients_info (self, client_list):
+        '''
+        Version 1 
+        API to get client information: Currently only state and if client is present. 
+        Input: List of clients  
+        '''
+         
+        json_attr = []
+        for key in client_list:
+           json_attr.append({'client_ip' : key})
+
+        params = {"is_range": False,
+                  "attr": json_attr }
+
+        return self._transmit("get_clients_info", params)
+
+
+     # execute 'method' for getting clients stats
+    def get_clients_info_range (self, client_start, client_end):
+        '''
+        Version 2 
+        API to get client information: Currently only state and if client is present. 
+        Input: Client range 
+        '''
+         
+        json_attr = []
+        json_attr.append({'client_start_ip' : client_start, 'client_end_ip' : client_end})
+ 
+
+        params = {"is_range": True,
+                  "attr": json_attr }
+
+        return self._transmit("get_clients_info", params)
+
+
 
 ############################   console   #############################
 ############################   commands  #############################
@@ -1199,31 +1308,65 @@ class ASTFClient(TRexClient):
         self.reset(restart = opts.restart)
         return True
 
+
     @console_api('start', 'ASTF', True)
     def start_line(self, line):
         '''Start traffic command'''
 
-        parser = parsing_opts.gen_parser(
-            self,
-            'start',
-            self.start_line.__doc__,
-            parsing_opts.FILE_PATH,
-            parsing_opts.MULTIPLIER_NUM,
-            parsing_opts.DURATION,
-            parsing_opts.TUNABLES,
-            parsing_opts.ASTF_NC,
-            parsing_opts.ASTF_LATENCY,
-            parsing_opts.ASTF_IPV6,
-            parsing_opts.ASTF_CLIENT_CTRL,
-            parsing_opts.ASTF_PROFILE_LIST
-            )
+        # parse tunables with the previous form. (-t var1=x1,var2=x2..)
+        def parse_tunables_old_version(tunables_parameters):
+            parser = parsing_opts.gen_parser(self,
+                                "start",
+                                self.start_line.__doc__,
+                                parsing_opts.TUNABLES)
+
+            args = parser.parse_args(tunables_parameters.split())
+            return args.tunables
+
+        # parser for parsing the start command arguments
+        parser = parsing_opts.gen_parser(self,
+                                         'start',
+                                         self.start_line.__doc__,
+                                         parsing_opts.FILE_PATH,
+                                         parsing_opts.MULTIPLIER_NUM,
+                                         parsing_opts.DURATION,
+                                         parsing_opts.ARGPARSE_TUNABLES,
+                                         parsing_opts.ASTF_NC,
+                                         parsing_opts.ASTF_LATENCY,
+                                         parsing_opts.ASTF_IPV6,
+                                         parsing_opts.ASTF_CLIENT_CTRL,
+                                         parsing_opts.ASTF_PROFILE_LIST
+                                         )
 
         opts = parser.parse_args(shlex.split(line))
-       
+        help_flags = ('-h', '--help')
+
+        # if the user chose to pass the tunables arguments in previous version (-t var1=x1,var2=x2..)
+        # we decode the tunables and then convert the output from dictionary to list in order to have the same format with the
+        # newer version.
+        tunable_dict = {}
+        if "-t" in line and '=' in line:
+            tunable_parameter = "-t " + line.split("-t")[1].strip("-h").strip("--help").strip()
+            tunable_dict = parse_tunables_old_version(tunable_parameter)
+            tunable_list = []
+            # converting from tunables dictionary to list 
+            for tunable_key in tunable_dict:
+                tunable_list.extend(["--{}".format(tunable_key), str(tunable_dict[tunable_key])])
+            if any(h in opts.tunables for h in help_flags):
+                tunable_list.append("--help")
+            opts.tunables = tunable_list
+
+        tunable_dict["tunables"] = opts.tunables
+
         valid_pids = self.validate_profile_id_input(opts.profiles, start = True)
         for profile_id in valid_pids:
 
-            self.load_profile(opts.file[0], opts.tunables, pid_input = profile_id)
+            self.load_profile(opts.file[0], tunable_dict, pid_input = profile_id)
+
+            #when ".. -t --help", is called the help message is being printed once and then it returns to the console
+            if any(h in opts.tunables for h in help_flags):
+                break
+
             kw = {}
             if opts.clients:
                 for client in opts.clients:

@@ -60,7 +60,13 @@ TrexAstfDpStop::TrexAstfDpStop(profile_id_t profile_id, uint32_t stop_id) {
 }
 
 bool TrexAstfDpStop::handle(TrexDpCore *dp_core) {
-    astf_core(dp_core)->stop_transmit(m_profile_id, m_stop_id);
+    if (m_core) {   // from add_profile_duration()
+        astf_core(dp_core)->stop_transmit(m_profile_id, m_stop_id, false);
+    }
+    else {
+        bool set_nc = (m_stop_id != 0); // override nc when CP requests
+        astf_core(dp_core)->stop_transmit(m_profile_id, m_stop_id, set_nc);
+    }
     return true;
 }
 
@@ -202,3 +208,56 @@ TrexAstfDpServiceMode::handle(TrexDpCore *dp_core) {
     astf_core->set_service_mode(m_enabled, m_filtered, m_mask);
     return true;
 }
+
+/*************************
++  Activate/Deactivate  Client MSG
++ ************************/
+TrexAstfDpActivateClient::TrexAstfDpActivateClient(CAstfDB* astf_db, std::vector<uint32_t> msg_data, bool activate, bool is_range) {
+    m_astf_db = astf_db;
+    m_msg_data =  msg_data;
+    m_activate = activate;
+    m_is_range = is_range;
+}
+
+bool TrexAstfDpActivateClient::handle(TrexDpCore *dp_core) {
+    astf_core(dp_core)->activate_client(m_astf_db, m_msg_data, m_activate, m_is_range);
+    return true;
+}
+
+TrexCpToDpMsgBase* TrexAstfDpActivateClient::clone() {
+    return new TrexAstfDpActivateClient(m_astf_db, m_msg_data, m_activate, m_is_range);
+}
+
+/*************************
++  Get Client Stats MSG
++ ************************/
+
+bool TrexAstfDpGetClientStats::handle(TrexDpCore *dp_core) {
+    astf_core(dp_core)->get_client_stats(m_astf_db, m_msg_data, m_is_range, m_reply);
+    return true;
+}
+
+TrexCpToDpMsgBase* TrexAstfDpGetClientStats::clone() {
+    return new TrexAstfDpGetClientStats(m_astf_db, m_msg_data, m_is_range, m_reply);
+}
+
+/*************************
+*  Update tunnel info to Client MSG
+*************************/
+TrexAstfDpUpdateTunnelClient::TrexAstfDpUpdateTunnelClient(CAstfDB* astf_db, std::vector<client_tunnel_data_t> msg_data, uint8_t tunnel_type) {
+    m_astf_db = astf_db;
+    m_msg_data =  msg_data;
+    m_tunnel_type = tunnel_type;
+}
+
+bool TrexAstfDpUpdateTunnelClient::handle(TrexDpCore *dp_core) {
+    astf_core(dp_core)->update_tunnel_for_client(m_astf_db, m_msg_data, m_tunnel_type);
+    return true;
+}
+
+TrexCpToDpMsgBase* TrexAstfDpUpdateTunnelClient::clone() {
+    return new TrexAstfDpUpdateTunnelClient(m_astf_db, m_msg_data, m_tunnel_type);
+}
+
+
+

@@ -27,7 +27,7 @@
 
 #include <rte_byteorder.h>
 #include <rte_errno.h>
-#include <rte_ethdev_driver.h>
+#include <ethdev_driver.h>
 #include <rte_ether.h>
 #include <rte_flow.h>
 #include <rte_flow_driver.h>
@@ -980,12 +980,13 @@ mlx4_drop_get(struct mlx4_priv *priv)
 	priv->drop = drop;
 	return drop;
 error:
-	if (drop->qp)
-		claim_zero(mlx4_glue->destroy_qp(drop->qp));
-	if (drop->cq)
-		claim_zero(mlx4_glue->destroy_cq(drop->cq));
-	if (drop)
+	if (drop) {
+		if (drop->qp)
+			claim_zero(mlx4_glue->destroy_qp(drop->qp));
+		if (drop->cq)
+			claim_zero(mlx4_glue->destroy_cq(drop->cq));
 		rte_free(drop);
+	}
 	rte_errno = ENOMEM;
 	return NULL;
 }

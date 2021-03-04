@@ -107,14 +107,14 @@ test_rx_check_http_negative_disabled:
 
 
 test_rx_check_sfr: &rx_sfr
-    multiplier          : 10
-    cores               : 3
-    rx_sample_rate      : 16
-    bw_per_core         : 16.082
+   multiplier          : 10
+   cores               : 3
+   rx_sample_rate      : 16
+   bw_per_core         : 16.082
 
 test_rx_check_sfr_ipv6:
-    <<                  : *rx_sfr
-    bw_per_core         : 19.198
+   <<                  : *rx_sfr
+   bw_per_core         : 19.198
 
 
 

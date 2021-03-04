@@ -267,6 +267,9 @@ class ASTFProgram(object):
             prog_s.delay(10)
             prog_s.reset()
 
+
+
+
      """
 
     MIN_DELAY = 50 
@@ -277,6 +280,7 @@ class ASTFProgram(object):
         """
 
         :parameters:
+
                   file : string
                      pcap file to analyze
 
@@ -294,6 +298,9 @@ class ASTFProgram(object):
 
                   udp_mtu: int or None
                       MTU for udp packets, if packets exceeding the specified value they will be cut down from L7 in order to fit. defaults to None.
+
+
+
         """
 
         ver_args = {"types":
@@ -1165,10 +1172,11 @@ class ASTFTCPOptions(object):
 
 class ASTFAssociationRule(object):
     """
+
        .. code-block:: python
 
             # only `port`
-            assoc=ASTFAssociationRule(`port`=81)
+            assoc=ASTFAssociationRule(port=81)
 
             # port with range or destination ips
             assoc=ASTFAssociationRule(port=81,ip_start="48.0.0.1",ip_end="48.0.0,16")
@@ -1179,12 +1187,14 @@ class ASTFAssociationRule(object):
             # port with L7 content mapping value (server-only mode)
             assoc=ASTFAssociationRule(port=81,l7_map={ "offset": [0,1], "value": [0,42] })
 
+
     """
 
     def __init__(self, port=80, ip_start=None, ip_end=None, l7_map=None):
         """
 
         :parameters:
+
             port: uint16_t
                 destination port
 
@@ -1196,6 +1206,7 @@ class ASTFAssociationRule(object):
 
             l7_map: list or dict
                 L7 mapping content by byte offsets with optional masks and values
+
 
         """
 
@@ -1231,11 +1242,13 @@ class ASTFAssociation(object):
 
             assoc=ASTFAssociationRule(port=81)
 
+
     """
     def __init__(self, rules=ASTFAssociationRule()):
         """
 
         :parameters:
+
                   rules  : ASTFAssociationRule see :class:`trex.astf.trex_astf_profile.ASTFAssociationRule`
                        rule or rules list
 
@@ -1307,11 +1320,10 @@ class ASTFTCPClientTemplate(_ASTFClientTemplate):
 
        .. code-block:: python
 
-            # client commands
+             client commands
             prog_c = ASTFProgram()
             prog_c.send(http_req)
             prog_c.recv(len(http_response))
-
 
             # ip generator
             ip_gen_c = ASTFIPGenDist(ip_range=["16.0.0.0", "16.0.0.255"], distribution="seq")
@@ -1321,7 +1333,10 @@ class ASTFTCPClientTemplate(_ASTFClientTemplate):
                                dist_server=ip_gen_s)
 
             # template
-            temp_c = ASTFTCPClientTemplate(program=prog_c, ip_gen=ip_gen)
+            temp_c = ASTFTCPClientTemplate(program=prog_c, ip_gen=ip_gen)  
+
+
+
 
      """
 
@@ -1330,6 +1345,7 @@ class ASTFTCPClientTemplate(_ASTFClientTemplate):
         """
 
         :parameters:
+                  
                   ip_gen  : ASTFIPGen see :class:`trex.astf.trex_astf_profile.ASTFIPGen`
                        generator
 
@@ -1351,7 +1367,6 @@ class ASTFTCPClientTemplate(_ASTFClientTemplate):
                         try to keep the number of flows up to limit.
 
                   glob_info : ASTFGlobalInfoPerTemplate see :class:`trex.astf.trex_astf_global_info.ASTFGlobalInfoPerTemplate`
-
         """
 
         ver_args = {"types":
@@ -1901,6 +1916,15 @@ class ASTFProfile(object):
     def load_py (cls, python_file, **kwargs):
         """ Load from ASTF Python profile """
 
+        # in case load_py is not being called from astf_client, there is need to convert
+        # the tunables to the new format to support argparse. 
+        if "tunables" not in kwargs:
+            tunable_list = []
+            # converting from tunables dictionary to list 
+            for tunable_key in kwargs:
+                tunable_list.extend(["--{}".format(tunable_key), str(kwargs[tunable_key])])
+            kwargs["tunables"] = tunable_list
+
         # check filename
         if not os.path.isfile(python_file):
             raise TRexError("File '{0}' does not exist".format(python_file))
@@ -1920,6 +1944,9 @@ class ASTFProfile(object):
             profile.meta = {'type': 'python',
                             'tunables': t}
             return profile
+        except SystemExit:
+                # called ".. -t --help", return None
+            return None
         finally:
             sys.path.remove(basedir)
 

@@ -443,7 +443,7 @@ bool CTcpFlow::check_template_assoc_by_l7_data(uint8_t* l7_data, uint16_t l7_len
 
     if (temp) {
         CPerProfileCtx* pctx = temp->get_profile_ctx();
-        if (pctx->is_active() || !pctx->get_nc()) {
+        if (pctx->is_open_flow_allowed()) {
             m_template_info = temp;
             return true;
         }
@@ -687,9 +687,7 @@ bool CTcpPerThreadCtx::is_open_flow_enabled(){
 void CTcpPerThreadCtx::timer_w_on_tick(){
 #ifndef TREX_SIM
     /* we have two levels on non-sim */
-    uint32_t left;
-    m_timer_w.on_tick_level0((void*)this,ctx_timer);
-    m_timer_w.on_tick_level_count(1,(void*)this,ctx_timer,16,left);
+    m_timer_w.on_tick_level((void*)this,ctx_timer,16);
 #else
     m_timer_w.on_tick_level0((void*)this,ctx_timer);
 #endif
@@ -844,7 +842,7 @@ bool CTcpPerThreadCtx::Create(uint32_t size,
 #ifdef  TREX_SIM
     tw_res = m_timer_w.Create(1024,TCP_TIMER_LEVEL1_DIV);
 #else
-    tw_res = m_timer_w.Create((2*1024),(TCP_TIMER_LEVEL1_DIV/2));
+    tw_res = m_timer_w.Create((1024),(TCP_TIMER_LEVEL1_DIV),4);
 #endif
 
 
@@ -1030,7 +1028,7 @@ CServerTemplateInfo* CServerIpPayloadInfo::get_reference_template_info() {
             m_template_ref = &it->second;
             break;
         }
-        if (!pctx->get_nc()) {
+        if (pctx->is_open_flow_allowed()) {
             m_template_ref = &it->second;
         }
     }

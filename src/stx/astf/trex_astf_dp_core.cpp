@@ -31,7 +31,7 @@ limitations under the License.
 #include "trex_astf_dp_core.h"
 #include "trex_astf_topo.h"
 #include "trex_client_config.h"
-
+#include "tunnels/tunnel_factory_creator.h"
 
 using namespace std;
 
@@ -43,10 +43,27 @@ TrexAstfDpCore::TrexAstfDpCore(uint8_t thread_id, CFlowGenListPerThread *core) :
     m_flow_gen->Create_tcp_ctx();
     m_active_profile_cnt = 0;
     m_profile_states.clear();
+    m_mbuf_redirect_cache = nullptr;
+
+    if (CGlobalInfo::m_options.m_astf_best_effort_mode) {
+        // software RSS, need to create cache.
+        uint8_t num_dp_cores = CGlobalInfo::m_options.preview.getCores() * CGlobalInfo::m_options.get_expected_dual_ports();
+        CTcpPerThreadCtx* client_tcp_ctx = m_core->m_c_tcp; // Client context as we redirect only for clients.
+        m_mbuf_redirect_cache = new MbufRedirectCache(client_tcp_ctx, num_dp_cores, m_thread_id);
+    }
 }
 
 TrexAstfDpCore::~TrexAstfDpCore() {
+    delete m_mbuf_redirect_cache;
+    m_mbuf_redirect_cache = nullptr;
     m_flow_gen->Delete_tcp_ctx();
+}
+
+void TrexAstfDpCore::stop() {
+    if (m_mbuf_redirect_cache) {
+        m_mbuf_redirect_cache->flush_and_stop_redirect();
+    }
+    TrexDpCore::stop();
 }
 
 bool TrexAstfDpCore::are_all_ports_idle() {
@@ -80,10 +97,12 @@ bool TrexAstfDpCore::get_profile_nc(profile_id_t profile_id) {
     return m_flow_gen->m_c_tcp->get_profile_nc(profile_id);
 }
 
-void TrexAstfDpCore::set_profile_stopping(profile_id_t profile_id) {
+void TrexAstfDpCore::set_profile_stopping(profile_id_t profile_id, bool stop_all) {
     set_profile_state(profile_id, pSTATE_WAIT);
     m_flow_gen->m_c_tcp->deactivate_profile_ctx(profile_id);
-    m_flow_gen->m_s_tcp->deactivate_profile_ctx(profile_id);
+    if (stop_all) {
+        m_flow_gen->m_s_tcp->deactivate_profile_ctx(profile_id);
+    }
 
     CPerProfileCtx* pctx = m_flow_gen->m_c_tcp->get_profile_ctx(profile_id);
     CGenNodeTXFIF* tx_node = (CGenNodeTXFIF*)pctx->m_tx_node;
@@ -95,10 +114,19 @@ void TrexAstfDpCore::set_profile_stopping(profile_id_t profile_id) {
 
 void TrexAstfDpCore::on_profile_stop_event(profile_id_t profile_id) {
     if (get_profile_state(profile_id) == pSTATE_WAIT && m_state == STATE_TRANSMITTING) {
-        if ((m_flow_gen->m_c_tcp->profile_flow_cnt(profile_id) == 0) &&
-            (m_flow_gen->m_s_tcp->profile_flow_cnt(profile_id) == 0)) {
+        CPerProfileCtx* c_pctx = m_flow_gen->m_c_tcp->get_profile_ctx(profile_id);
+        CPerProfileCtx* s_pctx = m_flow_gen->m_s_tcp->get_profile_ctx(profile_id);
+
+        if (!c_pctx->is_stopped()) {
+            if (m_flow_gen->m_c_tcp->profile_flow_cnt(profile_id) == 0) {
+                report_finished_partial(profile_id);
+                c_pctx->set_stopped();
+            }
+        }
+        else if (!s_pctx->is_active() && m_flow_gen->m_s_tcp->profile_flow_cnt(profile_id) == 0) {
             set_profile_state(profile_id, pSTATE_LOADED);
             report_finished(profile_id);
+            s_pctx->set_stopped();
 
             m_flow_gen->m_c_tcp->set_profile_cb(profile_id, this, nullptr);
             m_flow_gen->m_s_tcp->set_profile_cb(profile_id, this, nullptr);
@@ -288,31 +316,39 @@ void TrexAstfDpCore::start_profile_ctx(profile_id_t profile_id, double duration,
 }
 
 void TrexAstfDpCore::stop_profile_ctx(profile_id_t profile_id, uint32_t stop_id) {
-    /* skip unmatched stop_id which means previous profile action */
+    /* skip unmatched stop_id which comes from removed profile */
     if (stop_id && !is_profile_stop_id(profile_id, stop_id)) {
         return;
     }
 
-    set_profile_stopping(profile_id);
-    if (stop_id == 0) {                     /* override nc when CP requested */
-        set_profile_nc(profile_id, true);   /* triggering no clean flow close */
-    }
+    set_profile_stopping(profile_id, (stop_id == 0));
 
     if (m_flow_gen->is_terminated_by_master()) {
         add_global_duration(0.0001); // trigger exit from node scheduler
         return;
     }
 
-    if ((m_flow_gen->m_c_tcp->profile_flow_cnt(profile_id) == 0) &&
-        (m_flow_gen->m_s_tcp->profile_flow_cnt(profile_id) == 0)) {
-        m_flow_gen->flush_tx_queue();
+    if (stop_id) {  /* stop client only */
+        CPerProfileCtx* c_pctx = m_flow_gen->m_c_tcp->get_profile_ctx(profile_id);
 
-        set_profile_state(profile_id, pSTATE_LOADED);
-        report_finished(profile_id);
+        if (!c_pctx->is_stopped() && (m_flow_gen->m_c_tcp->profile_flow_cnt(profile_id) == 0)) {
+            report_finished_partial(profile_id);
+            c_pctx->set_stopped();
+        }
     }
-    else {
-        set_profile_stop_event(profile_id);
+    else {  /* stop all: should be after all clients are stopped */
+        assert(m_flow_gen->m_c_tcp->profile_flow_cnt(profile_id) == 0);
+
+        if (m_flow_gen->m_s_tcp->profile_flow_cnt(profile_id) == 0) {
+            m_flow_gen->flush_tx_queue();
+
+            set_profile_state(profile_id, pSTATE_LOADED);
+            report_finished(profile_id);
+            m_flow_gen->m_s_tcp->get_profile_ctx(profile_id)->set_stopped();
+            return;
+        }
     }
+    set_profile_stop_event(profile_id);
 }
 
 void TrexAstfDpCore::parse_astf_json(profile_id_t profile_id, string *profile_buffer, string *topo_buffer, CAstfDB *astf_db) {
@@ -382,7 +418,6 @@ void TrexAstfDpCore::remove_astf_json(profile_id_t profile_id, CAstfDB* astf_db)
     report_finished(profile_id);
 }
 
-
 void TrexAstfDpCore::create_tcp_batch(profile_id_t profile_id, double factor, CAstfDB* astf_db) {
     TrexWatchDog::IOFunction dummy;
     (void)dummy;
@@ -403,14 +438,22 @@ void TrexAstfDpCore::create_tcp_batch(profile_id_t profile_id, double factor, CA
         astf_db->set_factor(factor);
     }
 
+    string errmsg;
+
     try {
         create_profile_state(profile_id);
         m_flow_gen->load_tcp_profile(profile_id, profile_cnt() == 1, astf_db);
+    } catch (const Json::LogicError &ex) {
+        errmsg = ex.what();
     } catch (const TrexException &ex) {
+        errmsg = ex.what();
+    }
+
+    if (!errmsg.empty()) {
         remove_profile_state(profile_id);
         m_flow_gen->unload_tcp_profile(profile_id, profile_cnt() == 0, astf_db);
         m_flow_gen->remove_tcp_profile(profile_id);
-        report_error(profile_id, "Could not create ASTF batch: " + string(ex.what()));
+        report_error(profile_id, "Could not create ASTF batch: " + errmsg);
         return;
     }
 
@@ -478,11 +521,21 @@ void TrexAstfDpCore::start_transmit(profile_id_t profile_id, double duration, bo
         report_error(profile_id, "Start in unexpected DP core state: " + std::to_string(m_state));
         break;
     }
+
+    if (m_mbuf_redirect_cache) {
+        // Start timer, it is safe in case of an already started timer.
+        m_mbuf_redirect_cache->start_redirect_timer();
+    }
 }
 
-void TrexAstfDpCore::stop_transmit(profile_id_t profile_id, uint32_t stop_id) {
+void TrexAstfDpCore::stop_transmit(profile_id_t profile_id, uint32_t stop_id, bool set_nc) {
     if (!is_profile(profile_id) || get_profile_state(profile_id) < pSTATE_STARTING) {
         return; // no action for invalid profile
+    }
+
+    if (set_nc) {   // means CP requests stop client (i.e. stop_id != 0)
+        set_profile_nc(profile_id, true);
+        set_profile_stop_id(profile_id, stop_id);
     }
 
     switch (m_state) {
@@ -500,20 +553,23 @@ void TrexAstfDpCore::stop_transmit(profile_id_t profile_id, uint32_t stop_id) {
         break;
     case STATE_STOPPING:
         set_profile_stopping(profile_id);
-        if (stop_id == 0) {
-            set_profile_nc(profile_id, true);
-        }
         break;
     default:
         report_error(profile_id, "Stop in unexpected DP core state: " + std::to_string(m_state));
         break;
     }
+
+    if (m_mbuf_redirect_cache && (m_active_profile_cnt == 0)) {
+        // Stop the timer when stopping the last profile.
+        // This is safe to call even in case of a stopped timer.
+        m_mbuf_redirect_cache->flush_and_stop_redirect();
+    }
 }
 
 void TrexAstfDpCore::stop_transmit(profile_id_t profile_id) {
-    uint32_t tmp_stop_id = -1;
+    uint32_t tmp_stop_id = -1;  // request stop client
     set_profile_stop_id(profile_id, tmp_stop_id);
-    stop_transmit(profile_id, tmp_stop_id);
+    stop_transmit(profile_id, tmp_stop_id, false);
 }
 
 void TrexAstfDpCore::scheduler(bool activate) {
@@ -566,12 +622,18 @@ void TrexAstfDpCore::report_finished(profile_id_t profile_id) {
     m_ring_to_cp->SecureEnqueue((CGenNode *)msg, true);
 }
 
+void TrexAstfDpCore::report_finished_partial(profile_id_t profile_id) {
+    TrexDpToCpMsgBase *msg = new TrexDpCoreStopped(m_flow_gen->m_thread_id, profile_id, true);
+    m_ring_to_cp->SecureEnqueue((CGenNode *)msg, true);
+}
+
 void TrexAstfDpCore::report_profile_ctx(profile_id_t profile_id) {
     CPerProfileCtx* client = m_flow_gen->m_c_tcp->get_profile_ctx(profile_id);
     CPerProfileCtx* server = m_flow_gen->m_s_tcp->get_profile_ctx(profile_id);
     TrexDpToCpMsgBase *msg = new TrexDpCoreProfileCtx(m_flow_gen->m_thread_id, profile_id, client, server);
     m_ring_to_cp->SecureEnqueue((CGenNode *)msg, true);
 }
+
 
 void TrexAstfDpCore::report_error(profile_id_t profile_id, const string &error) {
     TrexDpToCpMsgBase *msg = new TrexDpCoreError(m_flow_gen->m_thread_id, profile_id, error);
@@ -587,4 +649,97 @@ bool TrexAstfDpCore::rx_for_idle() {
     return m_flow_gen->handle_rx_pkts(true) > 0;
 }
 
+void inline TrexAstfDpCore::client_lookup_and_activate(uint32_t client, bool activate) {
+     CIpInfoBase *ip_info = m_flow_gen->client_lookup(client);
+     if (ip_info){
+         ip_info->set_client_active(activate);
+     }
+}
+
+void TrexAstfDpCore::activate_client(CAstfDB* astf_db, std::vector<uint32_t> msg_data, bool activate, bool is_range) {
+
+    if (is_range){
+        for (uint32_t client = msg_data[0]; client <= msg_data[1]; client++) {
+            client_lookup_and_activate(client, activate);
+        }
+        return;
+    }
+    for ( auto client : msg_data)
+    {
+        client_lookup_and_activate(client, activate);
+    }
+}
+
+
+Json::Value TrexAstfDpCore::client_data_to_json(void *cip_info) {
+    CIpInfoBase *ip_info = (CIpInfoBase *)cip_info;
+    Json::Value c_data = Json::objectValue;
+#ifndef TREX_SIM
+    TunnelFactoryCreator tfc;
+#endif
+   
+    c_data["Found"] = 0;
+    
+    if (!ip_info)
+        return c_data;
+    
+    c_data["Found"] = 1;    
+    if (ip_info->is_active()) 
+       c_data["state"] = "Active";
+    else
+       c_data["state"] = "Inactive";
+
+#ifndef TREX_SIM 
+    uint8_t type = ip_info->get_tunnel_type(); 
+    if (type !=  TUNNEL_TYPE_NONE) 
+       c_data["tunnel_type"] =  tfc.get_tunnel_type(type);
+#endif 
+    return c_data;
+}
+
+bool TrexAstfDpCore::get_client_stats(CAstfDB* astf_db, std::vector<uint32_t> msg_data, bool is_range, MsgReply<Json::Value> &reply) {
+
+    Json::Value res = Json::objectValue;
+    if (is_range){
+        for (uint32_t client = msg_data[0]; client <= msg_data[1]; client++) {
+            CIpInfoBase *ip_info = m_flow_gen->client_lookup(client);
+            res[to_string(client)] = client_data_to_json(ip_info);
+        }
+        reply.set_reply(res);
+        return true;
+    }
+    
+    for ( auto client : msg_data)
+    {
+        CIpInfoBase *ip_info = m_flow_gen->client_lookup(client);
+        res[to_string(client)] = client_data_to_json(ip_info);
+    }
+   
+    reply.set_reply(res);
+    return true;
+}
+
+
+void TrexAstfDpCore::update_tunnel_for_client(CAstfDB* astf_db, std::vector<client_tunnel_data_t> msg_data, uint8_t tunnel_type) {
+
+#ifndef TREX_SIM
+    TunnelFactoryCreator tfc;
+#endif
+    for (auto elem : msg_data) {
+        CIpInfoBase *ip_info = m_flow_gen->client_lookup(elem.client_ip);
+        if (ip_info) {
+ 
+#ifndef TREX_SIM 
+           void *tunnel = ip_info->get_tunnel_info();
+           if (tunnel){
+               tfc.update_tunnel_object(elem, tunnel, tunnel_type);
+           } else {
+               void *tunnel = tfc.get_tunnel_object(elem, tunnel_type); 
+               ip_info->set_tunnel_info(tunnel);
+               ip_info->set_tunnel_type(tunnel_type);
+           }
+#endif
+        }
+    }
+}
 

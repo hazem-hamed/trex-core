@@ -415,6 +415,7 @@ astf_src = SrcGroup(dir='src/stx/astf/',
         'trex_astf_rpc_cmds.cpp',
         'trex_astf_rx_core.cpp',
         'trex_astf_topo.cpp',
+        'trex_astf_mbuf_redirect.cpp'
     ])
 
 
@@ -507,7 +508,9 @@ cxxflags_base =['-DWIN_UCODE_SIM',
                 '-Wno-deprecated-declarations',
                 '-Wno-error=uninitialized',
                 '-std=c++0x',
-       ];
+                '-Wno-sign-compare',
+                '-Wno-strict-aliasing',
+                 '-Wno-address-of-packed-member',]
 
 
 

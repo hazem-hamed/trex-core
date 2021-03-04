@@ -40,6 +40,16 @@ limitations under the License.
 #include "trex_client_config.h"
 #include "trex_global.h"
 #include <random>
+#include "common/dlist.h"
+#include <tunnels/gtp_tunnel.h>
+#include <tunnels/tunnel_factory_creator.h>
+
+struct ActiveClientListNode {
+    TCDListNode  m_node;
+    void  *client;
+    bool   state;
+};
+
 
 typedef uint16_t  pool_index_t;
 #define CS_MAX_POOLS UINT16_MAX
@@ -70,6 +80,16 @@ static inline uint8_t reverse_bits8(uint8_t b) {
 
 static inline uint16_t rss_reverse_bits_port(uint16_t port){        
     return ( (port&0xff00) + reverse_bits8(port&0xff));
+}
+
+static inline uint16_t rss_get_thread_id_aligned (bool reversed,
+                                                  uint16_t aligned_port,
+                                                  uint16_t rss_thread_max,
+                                                  uint8_t reta_mask) {
+    if (reversed) {
+        aligned_port = rss_reverse_bits_port(aligned_port);
+    }
+    return (aligned_port & reta_mask) % rss_thread_max;
 }
 
 
@@ -255,11 +275,42 @@ class CIpInfoBase {
                 m_ref_cnt--;
             }
         }
- 
+       
+        /* Add reference pool object to client object */
+        void add_ref_pool_ptr(void *pool_ptr){
+            m_ref_pool_ptr.push_back(pool_ptr);
+        }
+
+        void set_client_active(bool activate);
+
+        void detach_pool_and_client_node(void *ip_pool);
+
+        /* Add DLL node which will be used of active client list */ 
+        ActiveClientListNode * add_client_list_node(void *client){
+            ActiveClientListNode  *cn = new ActiveClientListNode();
+            cn->client= client;
+            cn->state = false;
+            m_active_c_node.push_back(cn);
+            return cn;
+        }
+
+        ActiveClientListNode *get_client_list_node(uint8_t idx) {
+            return m_active_c_node[idx];
+        }
+
+        void set_tunnel_type(uint8_t type) {
+            m_tunnel_type = type;
+        }
+
+        uint8_t get_tunnel_type(){
+            return m_tunnel_type;
+        }
+
         CIpInfoBase() { 
             m_is_active = false; 
             m_tunnel = NULL;
             m_ref_cnt = 0;
+            m_tunnel_type = TUNNEL_TYPE_NONE;
         }
 
         virtual ~CIpInfoBase() {}
@@ -268,6 +319,12 @@ class CIpInfoBase {
         bool              m_is_active;
         void              *m_tunnel;
         uint32_t          m_ref_cnt;    // shared reference count
+ 
+        /* 1 : 1 maapping between m_ref_pool_ptr and m_active_c_node */
+        std::vector<void *> m_ref_pool_ptr;
+        std::vector<ActiveClientListNode*> m_active_c_node;
+        uint8_t           m_tunnel_type; 
+ 
 };
 
 //CClientInfo for large amount of clients support
@@ -478,7 +535,6 @@ class CIpInfo : public CIpInfoBase {
     }
 };
 
-
 /**
  * a flat client info (no configuration)
  *  
@@ -686,50 +742,68 @@ public:
         m_rss_thread_max=0;
         m_reta_mask=0;
         m_rss_astf_mode=false;
-        m_active_clients.clear();
-        //m_cur_active_idx = 0;
-
+        m_active_clients.Create();
+        set_active_list_ptr_to_start();
     }
 
     uint32_t GenerateTuple(CTupleBase & tuple) {
 
-      CIpInfoBase* ip_info;
-      uint32_t idx;
+        CIpInfoBase* ip_info;
+        uint32_t idx = 0;
 
-      if ( CGlobalInfo::m_options.is_gtpu_enabled() == 0) {
-          idx = generate_ip();
-          CIpInfoBase* ip_info = m_ip_info[idx];
-          ip_info->generate_tuple(tuple);
-      }
-      else {
-        if (m_cur_act_itr == m_active_clients.end())
-            m_cur_act_itr = m_active_clients.begin();
-        idx = *m_cur_act_itr;
+        //Round robin. If we are tail , start from head
+        // Get index of client and increament for next active client 
+        if (is_active_list_iterator_at_end()) {
+           set_active_list_ptr_to_start();
+        }
+        ActiveClientListNode * ln = (ActiveClientListNode *)m_cur_act_itr.node();
+        ip_info = (CIpInfoBase *)ln->client;
         m_cur_act_itr++;
-        ip_info = m_ip_info[idx];
+        
+        idx = ip_info->get_ip() - m_ip_info[0]->get_ip();
         ip_info->generate_tuple(tuple);
         tuple.setTunHandle(ip_info->get_tunnel_info());
-      }
 
-      tuple.setClientId(idx);
-      if (tuple.getClientPort()==ILLEGAL_PORT) {
-          m_port_allocation_error++;
-      }
-      m_active_alloc++;
-      return idx;
+        tuple.setClientId(idx);
+        if (tuple.getClientPort()==ILLEGAL_PORT) {
+            m_port_allocation_error++;
+        }
+        m_active_alloc++;
+        return idx;
+    }
+
+    /* Add dll node of client object in active client list */
+    void append_client_into_active_list(ActiveClientListNode *cn){
+         cn->m_node.reset();
+         m_active_clients.append(&cn->m_node);
+    }
+
+    void set_client_active(CIpInfoBase *ip_info,
+                           ActiveClientListNode *cn,
+                           bool     activate);
+
+    /* If node we are deleting is same as current iterator of the active list, move forward and then delete */
+    void delete_client_from_active_list(ActiveClientListNode *cn){
+         if (((ActiveClientListNode *)m_cur_act_itr.node())->client == cn->client){
+             m_cur_act_itr++;
+         }
+         cn->m_node.detach();
+    }
+
+    /* Intialize iterator to start */
+    void set_active_list_ptr_to_start(){
+         m_cur_act_itr =  TCGenDListIterator(m_active_clients);
+    }
+
+    bool is_active_list_iterator_at_end(){
+         return (m_cur_act_itr.node() == nullptr) ? true : false;
     }
 
     bool has_active_clients() {
-        return (m_active_clients.size() > 0);
+        return (m_active_clients.is_empty() == true) ? false: true;
     }
 
     void Delete();
-
-
-    void set_clients_active(uint32_t        min_ip,
-                            uint32_t        max_ip,
-                            bool            activate);
-
 
     uint16_t get_tcp_aging() {
         return m_tcp_aging;
@@ -763,12 +837,6 @@ public:
     }
     
 
-    void set_tunnel_info_for_clients(uint32_t        min_ip,
-                                   uint32_t        max_ip,
-                                   bool            add,
-                                   void            *gtpu);
-
-
 public: 
     uint16_t m_tcp_aging;
     uint16_t m_udp_aging;
@@ -780,19 +848,17 @@ public:
 
     CFlowGenListPerThread* m_thread_ptr;
 
-    std::list<uint32_t> m_active_clients;
-    std::list<uint32_t>::iterator m_cur_act_itr;    
+    /* Active client list */
+    TCGenDList m_active_clients;
+    /* Iterator for active client lsit */
+    TCGenDListIterator m_cur_act_itr = TCGenDListIterator(m_active_clients);
 
 private:
-    void allocate_simple_clients(uint32_t  min_ip,
-                                 uint32_t  total_ip,
-                                 bool      is_long_range);
-
-    void allocate_configured_clients(uint32_t        min_ip,
-                                     uint32_t        total_ip,
-                                     bool            is_long_range,
-                                     ClientCfgDB     &client_info);
-
+    void allocate_simple_or_configured_clients(uint32_t  min_ip,
+                                               uint32_t  total_ip,
+                                               bool      is_long_range,
+                                               ClientCfgDB &client_info,
+                                               bool is_simple_alloc);
     void configure_client(uint32_t indx);
 };
 
@@ -998,6 +1064,9 @@ public:
     }
     CServerPoolBase* get_server_pool(pool_index_t idx) {
         return m_server_pool[idx];
+    }
+    CFlowGenListPerThread *get_client_flow_gen_list(){
+        return m_thread_ptr;
     }
     CClientPool* lookup(uint32_t ip);
   

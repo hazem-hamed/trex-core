@@ -1,5 +1,5 @@
 /* SPDX-License-Identifier: BSD-3-Clause
- * Copyright(c) 2014-2018 Broadcom
+ * Copyright(c) 2014-2021 Broadcom
  * All rights reserved.
  */
 
@@ -24,6 +24,11 @@ struct bnxt;
 #define BNXT_FLOW_L2_DROP_FLAG			BIT(5)
 #define BNXT_FLOW_PARSE_INNER_FLAG		BIT(6)
 #define BNXT_FLOW_MARK_FLAG			BIT(7)
+
+struct bnxt_flow_stats {
+	uint64_t	packets;
+	uint64_t	bytes;
+};
 
 struct bnxt_filter_info {
 	STAILQ_ENTRY(bnxt_filter_info)	next;
@@ -84,6 +89,7 @@ struct bnxt_filter_info {
 	 */
 	struct			bnxt_vnic_info *vnic;
 	uint32_t		mark;
+	struct bnxt_flow_stats	hw_stats;
 };
 
 struct bnxt_filter_info *bnxt_alloc_filter(struct bnxt *bp);

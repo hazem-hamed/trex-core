@@ -20,26 +20,10 @@
 extern "C" {
 #endif
 
-#include <stdio.h>
-#include <stdint.h>
-#include <string.h>
-#include <sys/queue.h>
-#include <errno.h>
-#include <rte_common.h>
-#include <rte_config.h>
-#include <rte_memory.h>
-#include <rte_lcore.h>
-#include <rte_atomic.h>
-#include <rte_branch_prediction.h>
-#include <rte_memzone.h>
-#include <rte_pause.h>
-
-#include "rte_ring.h"
+#include <rte_ring_core.h>
+#include <rte_ring_elem_pvt.h>
 
 /**
- * @warning
- * @b EXPERIMENTAL: this API may change without prior notice
- *
  * Calculate the memory size needed for a ring with given element size
  *
  * This function returns the number of bytes needed for a ring, given
@@ -57,13 +41,9 @@ extern "C" {
  *   - -EINVAL - esize is not a multiple of 4 or count provided is not a
  *		 power of 2.
  */
-__rte_experimental
 ssize_t rte_ring_get_memsize_elem(unsigned int esize, unsigned int count);
 
 /**
- * @warning
- * @b EXPERIMENTAL: this API may change without prior notice
- *
  * Create a new ring named *name* that stores elements with given size.
  *
  * This function uses ``memzone_reserve()`` to allocate memory. Then it
@@ -88,12 +68,30 @@ ssize_t rte_ring_get_memsize_elem(unsigned int esize, unsigned int count);
  *   constraint for the reserved zone.
  * @param flags
  *   An OR of the following:
- *    - RING_F_SP_ENQ: If this flag is set, the default behavior when
- *      using ``rte_ring_enqueue()`` or ``rte_ring_enqueue_bulk()``
- *      is "single-producer". Otherwise, it is "multi-producers".
- *    - RING_F_SC_DEQ: If this flag is set, the default behavior when
- *      using ``rte_ring_dequeue()`` or ``rte_ring_dequeue_bulk()``
- *      is "single-consumer". Otherwise, it is "multi-consumers".
+ *   - One of mutually exclusive flags that define producer behavior:
+ *      - RING_F_SP_ENQ: If this flag is set, the default behavior when
+ *        using ``rte_ring_enqueue()`` or ``rte_ring_enqueue_bulk()``
+ *        is "single-producer".
+ *      - RING_F_MP_RTS_ENQ: If this flag is set, the default behavior when
+ *        using ``rte_ring_enqueue()`` or ``rte_ring_enqueue_bulk()``
+ *        is "multi-producer RTS mode".
+ *      - RING_F_MP_HTS_ENQ: If this flag is set, the default behavior when
+ *        using ``rte_ring_enqueue()`` or ``rte_ring_enqueue_bulk()``
+ *        is "multi-producer HTS mode".
+ *     If none of these flags is set, then default "multi-producer"
+ *     behavior is selected.
+ *   - One of mutually exclusive flags that define consumer behavior:
+ *      - RING_F_SC_DEQ: If this flag is set, the default behavior when
+ *        using ``rte_ring_dequeue()`` or ``rte_ring_dequeue_bulk()``
+ *        is "single-consumer". Otherwise, it is "multi-consumers".
+ *      - RING_F_MC_RTS_DEQ: If this flag is set, the default behavior when
+ *        using ``rte_ring_dequeue()`` or ``rte_ring_dequeue_bulk()``
+ *        is "multi-consumer RTS mode".
+ *      - RING_F_MC_HTS_DEQ: If this flag is set, the default behavior when
+ *        using ``rte_ring_dequeue()`` or ``rte_ring_dequeue_bulk()``
+ *        is "multi-consumer HTS mode".
+ *     If none of these flags is set, then default "multi-consumer"
+ *     behavior is selected.
  * @return
  *   On success, the pointer to the new allocated ring. NULL on error with
  *    rte_errno set appropriately. Possible errno values include:
@@ -105,383 +103,8 @@ ssize_t rte_ring_get_memsize_elem(unsigned int esize, unsigned int count);
  *    - EEXIST - a memzone with the same name already exists
  *    - ENOMEM - no appropriate memory area found in which to create memzone
  */
-__rte_experimental
 struct rte_ring *rte_ring_create_elem(const char *name, unsigned int esize,
 			unsigned int count, int socket_id, unsigned int flags);
-
-static __rte_always_inline void
-__rte_ring_enqueue_elems_32(struct rte_ring *r, const uint32_t size,
-		uint32_t idx, const void *obj_table, uint32_t n)
-{
-	unsigned int i;
-	uint32_t *ring = (uint32_t *)&r[1];
-	const uint32_t *obj = (const uint32_t *)obj_table;
-	if (likely(idx + n < size)) {
-		for (i = 0; i < (n & ~0x7); i += 8, idx += 8) {
-			ring[idx] = obj[i];
-			ring[idx + 1] = obj[i + 1];
-			ring[idx + 2] = obj[i + 2];
-			ring[idx + 3] = obj[i + 3];
-			ring[idx + 4] = obj[i + 4];
-			ring[idx + 5] = obj[i + 5];
-			ring[idx + 6] = obj[i + 6];
-			ring[idx + 7] = obj[i + 7];
-		}
-		switch (n & 0x7) {
-		case 7:
-			ring[idx++] = obj[i++]; /* fallthrough */
-		case 6:
-			ring[idx++] = obj[i++]; /* fallthrough */
-		case 5:
-			ring[idx++] = obj[i++]; /* fallthrough */
-		case 4:
-			ring[idx++] = obj[i++]; /* fallthrough */
-		case 3:
-			ring[idx++] = obj[i++]; /* fallthrough */
-		case 2:
-			ring[idx++] = obj[i++]; /* fallthrough */
-		case 1:
-			ring[idx++] = obj[i++]; /* fallthrough */
-		}
-	} else {
-		for (i = 0; idx < size; i++, idx++)
-			ring[idx] = obj[i];
-		/* Start at the beginning */
-		for (idx = 0; i < n; i++, idx++)
-			ring[idx] = obj[i];
-	}
-}
-
-static __rte_always_inline void
-__rte_ring_enqueue_elems_64(struct rte_ring *r, uint32_t prod_head,
-		const void *obj_table, uint32_t n)
-{
-	unsigned int i;
-	const uint32_t size = r->size;
-	uint32_t idx = prod_head & r->mask;
-	uint64_t *ring = (uint64_t *)&r[1];
-	const uint64_t *obj = (const uint64_t *)obj_table;
-	if (likely(idx + n < size)) {
-		for (i = 0; i < (n & ~0x3); i += 4, idx += 4) {
-			ring[idx] = obj[i];
-			ring[idx + 1] = obj[i + 1];
-			ring[idx + 2] = obj[i + 2];
-			ring[idx + 3] = obj[i + 3];
-		}
-		switch (n & 0x3) {
-		case 3:
-			ring[idx++] = obj[i++]; /* fallthrough */
-		case 2:
-			ring[idx++] = obj[i++]; /* fallthrough */
-		case 1:
-			ring[idx++] = obj[i++];
-		}
-	} else {
-		for (i = 0; idx < size; i++, idx++)
-			ring[idx] = obj[i];
-		/* Start at the beginning */
-		for (idx = 0; i < n; i++, idx++)
-			ring[idx] = obj[i];
-	}
-}
-
-static __rte_always_inline void
-__rte_ring_enqueue_elems_128(struct rte_ring *r, uint32_t prod_head,
-		const void *obj_table, uint32_t n)
-{
-	unsigned int i;
-	const uint32_t size = r->size;
-	uint32_t idx = prod_head & r->mask;
-	rte_int128_t *ring = (rte_int128_t *)&r[1];
-	const rte_int128_t *obj = (const rte_int128_t *)obj_table;
-	if (likely(idx + n < size)) {
-		for (i = 0; i < (n & ~0x1); i += 2, idx += 2)
-			memcpy((void *)(ring + idx),
-				(const void *)(obj + i), 32);
-		switch (n & 0x1) {
-		case 1:
-			memcpy((void *)(ring + idx),
-				(const void *)(obj + i), 16);
-		}
-	} else {
-		for (i = 0; idx < size; i++, idx++)
-			memcpy((void *)(ring + idx),
-				(const void *)(obj + i), 16);
-		/* Start at the beginning */
-		for (idx = 0; i < n; i++, idx++)
-			memcpy((void *)(ring + idx),
-				(const void *)(obj + i), 16);
-	}
-}
-
-/* the actual enqueue of elements on the ring.
- * Placed here since identical code needed in both
- * single and multi producer enqueue functions.
- */
-static __rte_always_inline void
-__rte_ring_enqueue_elems(struct rte_ring *r, uint32_t prod_head,
-		const void *obj_table, uint32_t esize, uint32_t num)
-{
-	/* 8B and 16B copies implemented individually to retain
-	 * the current performance.
-	 */
-	if (esize == 8)
-		__rte_ring_enqueue_elems_64(r, prod_head, obj_table, num);
-	else if (esize == 16)
-		__rte_ring_enqueue_elems_128(r, prod_head, obj_table, num);
-	else {
-		uint32_t idx, scale, nr_idx, nr_num, nr_size;
-
-		/* Normalize to uint32_t */
-		scale = esize / sizeof(uint32_t);
-		nr_num = num * scale;
-		idx = prod_head & r->mask;
-		nr_idx = idx * scale;
-		nr_size = r->size * scale;
-		__rte_ring_enqueue_elems_32(r, nr_size, nr_idx,
-				obj_table, nr_num);
-	}
-}
-
-static __rte_always_inline void
-__rte_ring_dequeue_elems_32(struct rte_ring *r, const uint32_t size,
-		uint32_t idx, void *obj_table, uint32_t n)
-{
-	unsigned int i;
-	uint32_t *ring = (uint32_t *)&r[1];
-	uint32_t *obj = (uint32_t *)obj_table;
-	if (likely(idx + n < size)) {
-		for (i = 0; i < (n & ~0x7); i += 8, idx += 8) {
-			obj[i] = ring[idx];
-			obj[i + 1] = ring[idx + 1];
-			obj[i + 2] = ring[idx + 2];
-			obj[i + 3] = ring[idx + 3];
-			obj[i + 4] = ring[idx + 4];
-			obj[i + 5] = ring[idx + 5];
-			obj[i + 6] = ring[idx + 6];
-			obj[i + 7] = ring[idx + 7];
-		}
-		switch (n & 0x7) {
-		case 7:
-			obj[i++] = ring[idx++]; /* fallthrough */
-		case 6:
-			obj[i++] = ring[idx++]; /* fallthrough */
-		case 5:
-			obj[i++] = ring[idx++]; /* fallthrough */
-		case 4:
-			obj[i++] = ring[idx++]; /* fallthrough */
-		case 3:
-			obj[i++] = ring[idx++]; /* fallthrough */
-		case 2:
-			obj[i++] = ring[idx++]; /* fallthrough */
-		case 1:
-			obj[i++] = ring[idx++]; /* fallthrough */
-		}
-	} else {
-		for (i = 0; idx < size; i++, idx++)
-			obj[i] = ring[idx];
-		/* Start at the beginning */
-		for (idx = 0; i < n; i++, idx++)
-			obj[i] = ring[idx];
-	}
-}
-
-static __rte_always_inline void
-__rte_ring_dequeue_elems_64(struct rte_ring *r, uint32_t prod_head,
-		void *obj_table, uint32_t n)
-{
-	unsigned int i;
-	const uint32_t size = r->size;
-	uint32_t idx = prod_head & r->mask;
-	uint64_t *ring = (uint64_t *)&r[1];
-	uint64_t *obj = (uint64_t *)obj_table;
-	if (likely(idx + n < size)) {
-		for (i = 0; i < (n & ~0x3); i += 4, idx += 4) {
-			obj[i] = ring[idx];
-			obj[i + 1] = ring[idx + 1];
-			obj[i + 2] = ring[idx + 2];
-			obj[i + 3] = ring[idx + 3];
-		}
-		switch (n & 0x3) {
-		case 3:
-			obj[i++] = ring[idx++]; /* fallthrough */
-		case 2:
-			obj[i++] = ring[idx++]; /* fallthrough */
-		case 1:
-			obj[i++] = ring[idx++]; /* fallthrough */
-		}
-	} else {
-		for (i = 0; idx < size; i++, idx++)
-			obj[i] = ring[idx];
-		/* Start at the beginning */
-		for (idx = 0; i < n; i++, idx++)
-			obj[i] = ring[idx];
-	}
-}
-
-static __rte_always_inline void
-__rte_ring_dequeue_elems_128(struct rte_ring *r, uint32_t prod_head,
-		void *obj_table, uint32_t n)
-{
-	unsigned int i;
-	const uint32_t size = r->size;
-	uint32_t idx = prod_head & r->mask;
-	rte_int128_t *ring = (rte_int128_t *)&r[1];
-	rte_int128_t *obj = (rte_int128_t *)obj_table;
-	if (likely(idx + n < size)) {
-		for (i = 0; i < (n & ~0x1); i += 2, idx += 2)
-			memcpy((void *)(obj + i), (void *)(ring + idx), 32);
-		switch (n & 0x1) {
-		case 1:
-			memcpy((void *)(obj + i), (void *)(ring + idx), 16);
-		}
-	} else {
-		for (i = 0; idx < size; i++, idx++)
-			memcpy((void *)(obj + i), (void *)(ring + idx), 16);
-		/* Start at the beginning */
-		for (idx = 0; i < n; i++, idx++)
-			memcpy((void *)(obj + i), (void *)(ring + idx), 16);
-	}
-}
-
-/* the actual dequeue of elements from the ring.
- * Placed here since identical code needed in both
- * single and multi producer enqueue functions.
- */
-static __rte_always_inline void
-__rte_ring_dequeue_elems(struct rte_ring *r, uint32_t cons_head,
-		void *obj_table, uint32_t esize, uint32_t num)
-{
-	/* 8B and 16B copies implemented individually to retain
-	 * the current performance.
-	 */
-	if (esize == 8)
-		__rte_ring_dequeue_elems_64(r, cons_head, obj_table, num);
-	else if (esize == 16)
-		__rte_ring_dequeue_elems_128(r, cons_head, obj_table, num);
-	else {
-		uint32_t idx, scale, nr_idx, nr_num, nr_size;
-
-		/* Normalize to uint32_t */
-		scale = esize / sizeof(uint32_t);
-		nr_num = num * scale;
-		idx = cons_head & r->mask;
-		nr_idx = idx * scale;
-		nr_size = r->size * scale;
-		__rte_ring_dequeue_elems_32(r, nr_size, nr_idx,
-				obj_table, nr_num);
-	}
-}
-
-/* Between load and load. there might be cpu reorder in weak model
- * (powerpc/arm).
- * There are 2 choices for the users
- * 1.use rmb() memory barrier
- * 2.use one-direction load_acquire/store_release barrier,defined by
- * CONFIG_RTE_USE_C11_MEM_MODEL=y
- * It depends on performance test results.
- * By default, move common functions to rte_ring_generic.h
- */
-#ifdef RTE_USE_C11_MEM_MODEL
-#include "rte_ring_c11_mem.h"
-#else
-#include "rte_ring_generic.h"
-#endif
-
-/**
- * @internal Enqueue several objects on the ring
- *
- * @param r
- *   A pointer to the ring structure.
- * @param obj_table
- *   A pointer to a table of objects.
- * @param esize
- *   The size of ring element, in bytes. It must be a multiple of 4.
- *   This must be the same value used while creating the ring. Otherwise
- *   the results are undefined.
- * @param n
- *   The number of objects to add in the ring from the obj_table.
- * @param behavior
- *   RTE_RING_QUEUE_FIXED:    Enqueue a fixed number of items from a ring
- *   RTE_RING_QUEUE_VARIABLE: Enqueue as many items as possible from ring
- * @param is_sp
- *   Indicates whether to use single producer or multi-producer head update
- * @param free_space
- *   returns the amount of space after the enqueue operation has finished
- * @return
- *   Actual number of objects enqueued.
- *   If behavior == RTE_RING_QUEUE_FIXED, this will be 0 or n only.
- */
-static __rte_always_inline unsigned int
-__rte_ring_do_enqueue_elem(struct rte_ring *r, const void *obj_table,
-		unsigned int esize, unsigned int n,
-		enum rte_ring_queue_behavior behavior, unsigned int is_sp,
-		unsigned int *free_space)
-{
-	uint32_t prod_head, prod_next;
-	uint32_t free_entries;
-
-	n = __rte_ring_move_prod_head(r, is_sp, n, behavior,
-			&prod_head, &prod_next, &free_entries);
-	if (n == 0)
-		goto end;
-
-	__rte_ring_enqueue_elems(r, prod_head, obj_table, esize, n);
-
-	update_tail(&r->prod, prod_head, prod_next, is_sp, 1);
-end:
-	if (free_space != NULL)
-		*free_space = free_entries - n;
-	return n;
-}
-
-/**
- * @internal Dequeue several objects from the ring
- *
- * @param r
- *   A pointer to the ring structure.
- * @param obj_table
- *   A pointer to a table of objects.
- * @param esize
- *   The size of ring element, in bytes. It must be a multiple of 4.
- *   This must be the same value used while creating the ring. Otherwise
- *   the results are undefined.
- * @param n
- *   The number of objects to pull from the ring.
- * @param behavior
- *   RTE_RING_QUEUE_FIXED:    Dequeue a fixed number of items from a ring
- *   RTE_RING_QUEUE_VARIABLE: Dequeue as many items as possible from ring
- * @param is_sc
- *   Indicates whether to use single consumer or multi-consumer head update
- * @param available
- *   returns the number of remaining ring entries after the dequeue has finished
- * @return
- *   - Actual number of objects dequeued.
- *     If behavior == RTE_RING_QUEUE_FIXED, this will be 0 or n only.
- */
-static __rte_always_inline unsigned int
-__rte_ring_do_dequeue_elem(struct rte_ring *r, void *obj_table,
-		unsigned int esize, unsigned int n,
-		enum rte_ring_queue_behavior behavior, unsigned int is_sc,
-		unsigned int *available)
-{
-	uint32_t cons_head, cons_next;
-	uint32_t entries;
-
-	n = __rte_ring_move_cons_head(r, (int)is_sc, n, behavior,
-			&cons_head, &cons_next, &entries);
-	if (n == 0)
-		goto end;
-
-	__rte_ring_dequeue_elems(r, cons_head, obj_table, esize, n);
-
-	update_tail(&r->cons, cons_head, cons_next, is_sc, 0);
-
-end:
-	if (available != NULL)
-		*available = entries - n;
-	return n;
-}
 
 /**
  * Enqueue several objects on the ring (multi-producers safe).
@@ -510,7 +133,7 @@ rte_ring_mp_enqueue_bulk_elem(struct rte_ring *r, const void *obj_table,
 		unsigned int esize, unsigned int n, unsigned int *free_space)
 {
 	return __rte_ring_do_enqueue_elem(r, obj_table, esize, n,
-			RTE_RING_QUEUE_FIXED, __IS_MP, free_space);
+			RTE_RING_QUEUE_FIXED, RTE_RING_SYNC_MT, free_space);
 }
 
 /**
@@ -539,8 +162,13 @@ rte_ring_sp_enqueue_bulk_elem(struct rte_ring *r, const void *obj_table,
 		unsigned int esize, unsigned int n, unsigned int *free_space)
 {
 	return __rte_ring_do_enqueue_elem(r, obj_table, esize, n,
-			RTE_RING_QUEUE_FIXED, __IS_SP, free_space);
+			RTE_RING_QUEUE_FIXED, RTE_RING_SYNC_ST, free_space);
 }
+
+#ifdef ALLOW_EXPERIMENTAL_API
+#include <rte_ring_hts.h>
+#include <rte_ring_rts.h>
+#endif
 
 /**
  * Enqueue several objects on a ring.
@@ -569,8 +197,28 @@ static __rte_always_inline unsigned int
 rte_ring_enqueue_bulk_elem(struct rte_ring *r, const void *obj_table,
 		unsigned int esize, unsigned int n, unsigned int *free_space)
 {
-	return __rte_ring_do_enqueue_elem(r, obj_table, esize, n,
-			RTE_RING_QUEUE_FIXED, r->prod.single, free_space);
+	switch (r->prod.sync_type) {
+	case RTE_RING_SYNC_MT:
+		return rte_ring_mp_enqueue_bulk_elem(r, obj_table, esize, n,
+			free_space);
+	case RTE_RING_SYNC_ST:
+		return rte_ring_sp_enqueue_bulk_elem(r, obj_table, esize, n,
+			free_space);
+#ifdef ALLOW_EXPERIMENTAL_API
+	case RTE_RING_SYNC_MT_RTS:
+		return rte_ring_mp_rts_enqueue_bulk_elem(r, obj_table, esize, n,
+			free_space);
+	case RTE_RING_SYNC_MT_HTS:
+		return rte_ring_mp_hts_enqueue_bulk_elem(r, obj_table, esize, n,
+			free_space);
+#endif
+	}
+
+	/* valid ring should never reach this point */
+	RTE_ASSERT(0);
+	if (free_space != NULL)
+		*free_space = 0;
+	return 0;
 }
 
 /**
@@ -675,7 +323,7 @@ rte_ring_mc_dequeue_bulk_elem(struct rte_ring *r, void *obj_table,
 		unsigned int esize, unsigned int n, unsigned int *available)
 {
 	return __rte_ring_do_dequeue_elem(r, obj_table, esize, n,
-				RTE_RING_QUEUE_FIXED, __IS_MC, available);
+			RTE_RING_QUEUE_FIXED, RTE_RING_SYNC_MT, available);
 }
 
 /**
@@ -703,7 +351,7 @@ rte_ring_sc_dequeue_bulk_elem(struct rte_ring *r, void *obj_table,
 		unsigned int esize, unsigned int n, unsigned int *available)
 {
 	return __rte_ring_do_dequeue_elem(r, obj_table, esize, n,
-			RTE_RING_QUEUE_FIXED, __IS_SC, available);
+			RTE_RING_QUEUE_FIXED, RTE_RING_SYNC_ST, available);
 }
 
 /**
@@ -733,8 +381,28 @@ static __rte_always_inline unsigned int
 rte_ring_dequeue_bulk_elem(struct rte_ring *r, void *obj_table,
 		unsigned int esize, unsigned int n, unsigned int *available)
 {
-	return __rte_ring_do_dequeue_elem(r, obj_table, esize, n,
-			RTE_RING_QUEUE_FIXED, r->cons.single, available);
+	switch (r->cons.sync_type) {
+	case RTE_RING_SYNC_MT:
+		return rte_ring_mc_dequeue_bulk_elem(r, obj_table, esize, n,
+			available);
+	case RTE_RING_SYNC_ST:
+		return rte_ring_sc_dequeue_bulk_elem(r, obj_table, esize, n,
+			available);
+#ifdef ALLOW_EXPERIMENTAL_API
+	case RTE_RING_SYNC_MT_RTS:
+		return rte_ring_mc_rts_dequeue_bulk_elem(r, obj_table, esize,
+			n, available);
+	case RTE_RING_SYNC_MT_HTS:
+		return rte_ring_mc_hts_dequeue_bulk_elem(r, obj_table, esize,
+			n, available);
+#endif
+	}
+
+	/* valid ring should never reach this point */
+	RTE_ASSERT(0);
+	if (available != NULL)
+		*available = 0;
+	return 0;
 }
 
 /**
@@ -837,12 +505,12 @@ rte_ring_dequeue_elem(struct rte_ring *r, void *obj_p, unsigned int esize)
  * @return
  *   - n: Actual number of objects enqueued.
  */
-static __rte_always_inline unsigned
+static __rte_always_inline unsigned int
 rte_ring_mp_enqueue_burst_elem(struct rte_ring *r, const void *obj_table,
 		unsigned int esize, unsigned int n, unsigned int *free_space)
 {
 	return __rte_ring_do_enqueue_elem(r, obj_table, esize, n,
-			RTE_RING_QUEUE_VARIABLE, __IS_MP, free_space);
+			RTE_RING_QUEUE_VARIABLE, RTE_RING_SYNC_MT, free_space);
 }
 
 /**
@@ -866,12 +534,12 @@ rte_ring_mp_enqueue_burst_elem(struct rte_ring *r, const void *obj_table,
  * @return
  *   - n: Actual number of objects enqueued.
  */
-static __rte_always_inline unsigned
+static __rte_always_inline unsigned int
 rte_ring_sp_enqueue_burst_elem(struct rte_ring *r, const void *obj_table,
 		unsigned int esize, unsigned int n, unsigned int *free_space)
 {
 	return __rte_ring_do_enqueue_elem(r, obj_table, esize, n,
-			RTE_RING_QUEUE_VARIABLE, __IS_SP, free_space);
+			RTE_RING_QUEUE_VARIABLE, RTE_RING_SYNC_ST, free_space);
 }
 
 /**
@@ -897,12 +565,32 @@ rte_ring_sp_enqueue_burst_elem(struct rte_ring *r, const void *obj_table,
  * @return
  *   - n: Actual number of objects enqueued.
  */
-static __rte_always_inline unsigned
+static __rte_always_inline unsigned int
 rte_ring_enqueue_burst_elem(struct rte_ring *r, const void *obj_table,
 		unsigned int esize, unsigned int n, unsigned int *free_space)
 {
-	return __rte_ring_do_enqueue_elem(r, obj_table, esize, n,
-			RTE_RING_QUEUE_VARIABLE, r->prod.single, free_space);
+	switch (r->prod.sync_type) {
+	case RTE_RING_SYNC_MT:
+		return rte_ring_mp_enqueue_burst_elem(r, obj_table, esize, n,
+			free_space);
+	case RTE_RING_SYNC_ST:
+		return rte_ring_sp_enqueue_burst_elem(r, obj_table, esize, n,
+			free_space);
+#ifdef ALLOW_EXPERIMENTAL_API
+	case RTE_RING_SYNC_MT_RTS:
+		return rte_ring_mp_rts_enqueue_burst_elem(r, obj_table, esize,
+			n, free_space);
+	case RTE_RING_SYNC_MT_HTS:
+		return rte_ring_mp_hts_enqueue_burst_elem(r, obj_table, esize,
+			n, free_space);
+#endif
+	}
+
+	/* valid ring should never reach this point */
+	RTE_ASSERT(0);
+	if (free_space != NULL)
+		*free_space = 0;
+	return 0;
 }
 
 /**
@@ -929,12 +617,12 @@ rte_ring_enqueue_burst_elem(struct rte_ring *r, const void *obj_table,
  * @return
  *   - n: Actual number of objects dequeued, 0 if ring is empty
  */
-static __rte_always_inline unsigned
+static __rte_always_inline unsigned int
 rte_ring_mc_dequeue_burst_elem(struct rte_ring *r, void *obj_table,
 		unsigned int esize, unsigned int n, unsigned int *available)
 {
 	return __rte_ring_do_dequeue_elem(r, obj_table, esize, n,
-			RTE_RING_QUEUE_VARIABLE, __IS_MC, available);
+			RTE_RING_QUEUE_VARIABLE, RTE_RING_SYNC_MT, available);
 }
 
 /**
@@ -958,12 +646,12 @@ rte_ring_mc_dequeue_burst_elem(struct rte_ring *r, void *obj_table,
  * @return
  *   - n: Actual number of objects dequeued, 0 if ring is empty
  */
-static __rte_always_inline unsigned
+static __rte_always_inline unsigned int
 rte_ring_sc_dequeue_burst_elem(struct rte_ring *r, void *obj_table,
 		unsigned int esize, unsigned int n, unsigned int *available)
 {
 	return __rte_ring_do_dequeue_elem(r, obj_table, esize, n,
-			RTE_RING_QUEUE_VARIABLE, __IS_SC, available);
+			RTE_RING_QUEUE_VARIABLE, RTE_RING_SYNC_ST, available);
 }
 
 /**
@@ -993,10 +681,36 @@ static __rte_always_inline unsigned int
 rte_ring_dequeue_burst_elem(struct rte_ring *r, void *obj_table,
 		unsigned int esize, unsigned int n, unsigned int *available)
 {
-	return __rte_ring_do_dequeue_elem(r, obj_table, esize, n,
-				RTE_RING_QUEUE_VARIABLE,
-				r->cons.single, available);
+	switch (r->cons.sync_type) {
+	case RTE_RING_SYNC_MT:
+		return rte_ring_mc_dequeue_burst_elem(r, obj_table, esize, n,
+			available);
+	case RTE_RING_SYNC_ST:
+		return rte_ring_sc_dequeue_burst_elem(r, obj_table, esize, n,
+			available);
+#ifdef ALLOW_EXPERIMENTAL_API
+	case RTE_RING_SYNC_MT_RTS:
+		return rte_ring_mc_rts_dequeue_burst_elem(r, obj_table, esize,
+			n, available);
+	case RTE_RING_SYNC_MT_HTS:
+		return rte_ring_mc_hts_dequeue_burst_elem(r, obj_table, esize,
+			n, available);
+#endif
+	}
+
+	/* valid ring should never reach this point */
+	RTE_ASSERT(0);
+	if (available != NULL)
+		*available = 0;
+	return 0;
 }
+
+#ifdef ALLOW_EXPERIMENTAL_API
+#include <rte_ring_peek.h>
+#include <rte_ring_peek_zc.h>
+#endif
+
+#include <rte_ring.h>
 
 #ifdef __cplusplus
 }

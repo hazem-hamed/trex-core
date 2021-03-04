@@ -591,6 +591,13 @@ void CEmulApp::start(bool interrupt){
         m_q.set_window_size(m_api->get_tx_max_space(m_flow));
     }
     CEmulAppCmd * lpcmd=m_program->get_index(m_cmd_index);
+    /* inject implicit TCP accept to avoid issue #604 */
+    CEmulAppCmd temp_cmd;
+    if (!is_udp_flow() && !m_pctx->m_ctx->is_client_side() && (lpcmd->m_cmd == tcTX_BUFFER)) {
+        temp_cmd.m_cmd = tcCONNECT_WAIT;
+        lpcmd = &temp_cmd;
+        --m_cmd_index;  // rewind index for next_cmd()
+    }
     process_cmd(lpcmd);
     set_interrupt(false);
 }
@@ -616,7 +623,7 @@ int CEmulApp::on_bh_tx_acked(uint32_t tx_bytes){
     if (add_to_queue) {
         m_api->tx_sbappend(m_flow,add_to_queue);
     }
-    if (!(m_flags&taDO_WAIT_FOR_CLOSE) && is_next) {
+    if ((m_state == te_SEND) && is_next) {
         EMUL_LOG(0, "ON_BH_TX [%d]-ACK \n",m_debug_id);
         next();
     }

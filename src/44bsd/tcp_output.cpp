@@ -184,7 +184,7 @@ static inline int _tcp_build_cpkt(CPerProfileCtx * pctx,
         if (!ftp->is_tunnel_aware() && ctx->is_client_side()){
            INC_STAT(pctx, tp->m_flow->m_tg_id, tcps_notunnel);
         }
-        pkt.m_buf->dynfield1[0] = (uint64_t)ftp->m_tun_handle;
+        pkt.m_buf->dynfield_ptr = ftp->m_tun_handle;
      }
 
     if (m==0) {
@@ -870,7 +870,7 @@ void tcp_setpersist(CPerProfileCtx * pctx,
     assert(tp->t_timer[TCPT_REXMT]==0);
 
     /*
-     * Start/restart persistance timer.
+     * Start/restart persistence timer.
      */
     TCPT_RANGESET(tp->t_timer[TCPT_PERSIST],
         t * tcp_backoff[tp->t_rxtshift],

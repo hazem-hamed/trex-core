@@ -182,16 +182,14 @@ class TocHTMLParser(HTMLParser):
 
 
 
-def create_toc_json (input_file, output_file, link_fmt = None):
-    f = open (input_file)
-    l=f.readlines()
-    f.close();
+def create_toc_json(input_file, output_file, link_fmt=None):
+    with open(input_file, encoding="utf-8") as f:
+        l = f.readlines()
     html_input = ''.join(l)
     parser = TocHTMLParser(link_fmt)
     parser.feed(html_input);
-    f = open (output_file,'w')
-    f.write(parser.dump_as_json());
-    f.close();
+    with open(output_file, 'w') as f:
+        f.write(parser.dump_as_json())
 
 
 
@@ -440,10 +438,11 @@ def ensure_dir(f):
     
 
 def my_copy(task):
-    input_file=task.outputs[0].abspath()
-    out_dir=task.outputs[0].parent.get_bld().abspath()
+    input_file = task.outputs[0].get_src()
+    out_dir = task.outputs[0].parent.get_bld().abspath()
     ensure_dir(out_dir)
-    shutil.copy2(input_file, out_dir+ os.sep+task.outputs[0].name)
+    shutil.copy2(str(input_file), str(task.outputs[0]))
+
     return (0)
 
 
@@ -522,15 +521,8 @@ def build_cp_docs (task):
     if not trex_core_git_path: # there exists a default directory or the desired ENV variable.
         return 1
     trex_core_docs_path = os.path.abspath(os.path.join(trex_core_git_path, 'scripts', 'automation', 'trex_control_plane', 'doc'))
-    sphinx_version = get_sphinx_version(task.env['SPHINX'][0])
-    if not sphinx_version:
-        return 1
-    if sphinx_version < 1.3:
-        additional_args = '-D html_theme=default'
-    else:
-        additional_args = ''
-    build_doc_cmd = "{pyt} {sph} {add} {ver} -W -b {bld} {src} {dst}".format(
-        pyt= sys.executable,
+    additional_args = ''
+    build_doc_cmd = "{sph} {add} {ver} -W -b {bld} {src} {dst}".format(
         sph= task.env['SPHINX'][0],
         add= additional_args,
         ver= '' if Logs.verbose else '-q',
@@ -552,15 +544,8 @@ def build_stl_cp_docs (task):
     if not trex_core_git_path: # there exists a default directory or the desired ENV variable.
         return 1
     trex_core_docs_path = os.path.abspath(os.path.join(trex_core_git_path, 'scripts', 'automation', 'trex_control_plane', 'doc_stl'))
-    sphinx_version = get_sphinx_version(task.env['SPHINX'][0])
-    if not sphinx_version:
-        return 1
-    if sphinx_version < 1.3:
-        additional_args = '-D html_theme=default'
-    else:
-        additional_args = ''
-    build_doc_cmd = "{pyt} {sph} {add} {ver} -W -b {bld} {src} {dst}".format(
-        pyt= sys.executable,
+    additional_args = ''
+    build_doc_cmd = "{sph} {add} {ver} -W -b {bld} {src} {dst}".format(
         sph= task.env['SPHINX'][0],
         add= additional_args,
         ver= '' if Logs.verbose else '-q',
@@ -583,15 +568,8 @@ def build_astf_cp_docs (task):
     if not trex_core_git_path: # there exists a default directory or the desired ENV variable.
         return 1
     trex_core_docs_path = os.path.abspath(os.path.join(trex_core_git_path, 'scripts', 'automation', 'trex_control_plane', 'doc_astf'))
-    sphinx_version = get_sphinx_version(task.env['SPHINX'][0])
-    if not sphinx_version:
-        return 1
-    if sphinx_version < 1.3:
-        additional_args = '-D html_theme=default'
-    else:
-        additional_args = ''
-    build_doc_cmd = "{pyt} {sph} {add} {ver} -W -b {bld} {src} {dst}".format(
-        pyt= sys.executable,
+    additional_args = ''
+    build_doc_cmd = "{sph} {add} {ver} -W -b {bld} {src} {dst}".format(
         sph= task.env['SPHINX'][0],
         add= additional_args,
         ver= '' if Logs.verbose else '-q',
@@ -614,15 +592,8 @@ def build_ndr_cp_docs (task):
     if not trex_core_git_path: # there exists a default directory or the desired ENV variable.
         return 1
     trex_core_docs_path = os.path.abspath(os.path.join(trex_core_git_path, 'scripts', 'automation', 'trex_control_plane', 'doc_ndr'))
-    sphinx_version = get_sphinx_version(task.env['SPHINX'][0])
-    if not sphinx_version:
-        return 1
-    if sphinx_version < 1.3:
-        additional_args = '-D html_theme=default'
-    else:
-        additional_args = ''
-    build_doc_cmd = "{pyt} {sph} {add} {ver} -W -b {bld} {src} {dst}".format(
-        pyt= sys.executable,
+    additional_args = ''
+    build_doc_cmd = "{sph} {add} {ver} -W -b {bld} {src} {dst}".format(
         sph= task.env['SPHINX'][0],
         add= additional_args,
         ver= '' if Logs.verbose else '-q',
@@ -644,15 +615,8 @@ def build_emu_cp_docs (task):
     if not trex_core_git_path: # there exists a default directory or the desired ENV variable.
         return 1
     trex_core_docs_path = os.path.abspath(os.path.join(trex_core_git_path, 'scripts', 'automation', 'trex_control_plane', 'doc_emu'))
-    sphinx_version = get_sphinx_version(task.env['SPHINX'][0])
-    if not sphinx_version:
-        return 1
-    if sphinx_version < 1.3:
-        additional_args = '-D html_theme=default'
-    else:
-        additional_args = ''
-    build_doc_cmd = "{pyt} {sph} {add} {ver} -W -b {bld} {src} {dst}".format(
-        pyt= sys.executable,
+    additional_args = ''
+    build_doc_cmd = "{sph} {add} {ver} -W -b {bld} {src} {dst}".format(
         sph= task.env['SPHINX'][0],
         add= additional_args,
         ver= '' if Logs.verbose else '-q',
@@ -698,23 +662,26 @@ def build(bld):
     bld(rule=my_copy, target='nginx_if_cfg.txt')
 
     for x in bld.path.ant_glob('images\\**\**.png'):
-            bld(rule=my_copy, target=x)
+            x1 = os.path.relpath(str(x), str(bld.path))
+            bld(rule=my_copy, target=x1)
             bld.add_group() 
 
-
     for x in bld.path.ant_glob('yaml\\**\**.yaml'):
-            bld(rule=my_copy, target=x)
+            x1 = os.path.relpath(str(x), str(bld.path))
+            bld(rule=my_copy, target=x1)
             bld.add_group() 
 
 
 
     for x in bld.path.ant_glob('video\\**\**.mp4'):
-            bld(rule=my_copy, target=x)
+            x1 = os.path.relpath(str(x), str(bld.path))
+            bld(rule=my_copy, target=x1)
             bld.add_group() 
 
 
     for x in bld.path.ant_glob('images\\**\**.jpg'):
-        bld(rule=my_copy, target=x)
+        x1 = os.path.relpath(str(x), str(bld.path))
+        bld(rule=my_copy, target=x1)
         bld.add_group() 
 
     if bld.options.performance or bld.options.performance_detailed:
@@ -722,6 +689,7 @@ def build(bld):
         bld.add_group()
         bld(rule=convert_to_html_toc_book, source='trex_analytics.asciidoc waf.css', target='trex_analytics.html',scan=ascii_doc_scan);
         return
+
 
     if bld.options.ndr:
         bld(rule=create_ndr_report)
@@ -781,8 +749,8 @@ def build(bld):
     bld(rule=convert_to_html_toc_book_no_docinfo,
         source='trex_vm_bench.asciidoc waf.css', target='trex_vm_bench.html',scan=ascii_doc_scan)
 
-    bld(rule=lambda task : convert_to_asciidoctor_chunk_book(task, title = "TRex Cookbook", css = "css/trex_cookbook.css"),
-        source='trex_cookbook.asciidoc', target='trex_cookbook',scan=ascii_doc_scan);
+    #bld(rule=lambda task : convert_to_asciidoctor_chunk_book(task, title = "TRex Cookbook", css = "css/trex_cookbook.css"),
+    #    source='trex_cookbook.asciidoc', target='trex_cookbook',scan=ascii_doc_scan);
 
     bld(rule=convert_to_html_toc_book,
         source='trex_stateless.asciidoc waf.css', target='trex_stateless.html',scan=ascii_doc_scan);
@@ -1018,8 +986,8 @@ def test(bld):
     #toc_fixup_file ('build/trex_stateless.tmp',
     #                'build/trex_stateless.html',
     #                'trex_stateless.json')
-
-    print build_disqus("my_html")
+    pass
+    #print build_disqus("my_html")
   
 
 def run (bld):

@@ -7,7 +7,7 @@
 
 #include "virtqueue.h"
 #include "virtio_logs.h"
-#include "virtio_pci.h"
+#include "virtio.h"
 #include "virtio_rxtx_simple.h"
 
 /*
@@ -32,7 +32,8 @@ virtqueue_detach_unused(struct virtqueue *vq)
 	end = (vq->vq_avail_idx + vq->vq_free_cnt) & (vq->vq_nentries - 1);
 
 	for (idx = 0; idx < vq->vq_nentries; idx++) {
-		if (hw->use_simple_rx && type == VTNET_RQ) {
+		if (hw->use_vec_rx && !virtio_with_packed_queue(hw) &&
+		    type == VTNET_RQ) {
 			if (start <= end && idx >= start && idx < end)
 				continue;
 			if (start > end && (idx >= start || idx < end))
@@ -92,12 +93,12 @@ virtqueue_rxvq_flush_split(struct virtqueue *vq)
 	uint16_t used_idx, desc_idx;
 	uint16_t nb_used, i;
 
-	nb_used = VIRTQUEUE_NUSED(vq);
+	nb_used = virtqueue_nused(vq);
 
 	for (i = 0; i < nb_used; i++) {
 		used_idx = vq->vq_used_cons_idx & (vq->vq_nentries - 1);
 		uep = &vq->vq_split.ring.used->ring[used_idx];
-		if (hw->use_simple_rx) {
+		if (hw->use_vec_rx) {
 			desc_idx = used_idx;
 			rte_pktmbuf_free(vq->sw_ring[desc_idx]);
 			vq->vq_free_cnt++;
@@ -121,7 +122,7 @@ virtqueue_rxvq_flush_split(struct virtqueue *vq)
 		vq->vq_used_cons_idx++;
 	}
 
-	if (hw->use_simple_rx) {
+	if (hw->use_vec_rx) {
 		while (vq->vq_free_cnt >= RTE_VIRTIO_VPMD_RX_REARM_THRESH) {
 			virtio_rxq_rearm_vec(rxq);
 			if (virtqueue_kick_prepare(vq))
@@ -136,7 +137,7 @@ virtqueue_rxvq_flush(struct virtqueue *vq)
 {
 	struct virtio_hw *hw = vq->hw;
 
-	if (vtpci_packed_queue(hw))
+	if (virtio_with_packed_queue(hw))
 		virtqueue_rxvq_flush_packed(vq);
 	else
 		virtqueue_rxvq_flush_split(vq);
@@ -174,6 +175,7 @@ virtqueue_rxvq_reset_packed(struct virtqueue *vq)
 
 	vring_desc_init_packed(vq, size);
 
+	virtqueue_disable_intr(vq);
 	return 0;
 }
 
@@ -210,5 +212,6 @@ virtqueue_txvq_reset_packed(struct virtqueue *vq)
 
 	vring_desc_init_packed(vq, size);
 
+	virtqueue_disable_intr(vq);
 	return 0;
 }

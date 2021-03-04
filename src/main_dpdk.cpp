@@ -810,6 +810,7 @@ COLD_FUNC static int parse_options(int argc, char *argv[], bool first_time ) {
                             rgpszArg = args.MultiArg(1);
                         } while (rgpszArg != NULL);
                     }
+                    CGlobalInfo::m_options.m_expected_portd = (uint16_t)cg->m_if_list.size();
                 }
                 set_op_mode(OP_MODE_DUMP_INTERFACES);
                 break;
@@ -995,6 +996,7 @@ COLD_FUNC static int parse_options(int argc, char *argv[], bool first_time ) {
 
 
     if ( first_time ){
+
         /* only first time read the configuration file */
         if ( po->platform_cfg_file.length() >0  ) {
             if ( node_dump ){
@@ -1950,7 +1952,7 @@ HOT_FUNC rte_mbuf* CCoreEthIFStateless::update_node_flow_stat(rte_mbuf *m, CGenN
         lp_stats->m_lat_data[hw_id_payload].inc_seq_num();
 #ifdef ERR_CNTRS_TEST
         if (temp % 10 == 0) {
-            fsp_head->seq = lp_stats->m_lat_data[hw_id_payload].inc_seq_num();
+            fsp_head->seq = lp_stats->m_lat_data[hw_id_payload].get_seq_num();
         }
         if ((temp - 1) % 100 == 0) {
             fsp_head->seq = lp_stats->m_lat_data[hw_id_payload].get_seq_num() - 4;
@@ -3608,10 +3610,19 @@ COLD_FUNC bool CGlobalTRex::Create(){
                                   !CGlobalInfo::m_options.preview.get_zmq_publish_enable() ) ){
         return (false);
     }
+    m_zmq_publisher.set_interactive_mode(get_mode()->is_interactive());
 
-
+    bool is_astf_best_effort_mode = get_mode()->is_astf_best_effort_mode();
+    if (is_astf_best_effort_mode) {
+        // set data needed for this mode
+        CTrexDpdkParams dpdk_p;
+        get_dpdk_drv_params(dpdk_p);
+        CGlobalInfo::m_options.m_tx_ring_size = dpdk_p.tx_desc_num;
+        CGlobalInfo::m_options.m_reta_mask = 0xFF;
+        CGlobalInfo::m_options.m_astf_best_effort_mode = true;
+    }
     /* allocate rings */
-    assert( CMsgIns::Ins()->Create(get_cores_tx()) );
+    assert( CMsgIns::Ins()->Create(get_cores_tx(), is_astf_best_effort_mode) );
 
     if ( sizeof(CGenNodeNatInfo) != sizeof(CGenNode)  ) {
         printf("ERROR sizeof(CGenNodeNatInfo) %lu != sizeof(CGenNode) %lu must be the same size \n",sizeof(CGenNodeNatInfo),sizeof(CGenNode));
@@ -4666,9 +4677,11 @@ CGlobalTRex::publish_async_data(bool sync_now, bool baseline) {
     m_stats.dump_json(json, baseline);
     m_zmq_publisher.publish_json(json);
 
-    /* generator json , all cores are the same just sample the first one */
-    m_fl.m_threads_info[0]->m_node_gen.dump_json(json);
-    m_zmq_publisher.publish_json(json);
+    if (!get_mode()->is_interactive() ){
+        /* generator json , all cores are the same just sample the first one */
+        m_fl.m_threads_info[0]->m_node_gen.dump_json(json);
+        m_zmq_publisher.publish_json(json);
+    }
 
     /* config specific stats */
     m_stx->publish_async_data();
@@ -5456,17 +5469,6 @@ COLD_FUNC void CPhyEthIF::conf_hardware_astf_rss() {
         hash_key_size = dev_info->hash_key_size;
     }
 
-    if (!rte_eth_dev_filter_supported(m_repid, RTE_ETH_FILTER_HASH)) {
-        // Setup HW to use the TOEPLITZ hash function as an RSS hash function
-        struct rte_eth_hash_filter_info info = {};
-        info.info_type = RTE_ETH_HASH_FILTER_GLOBAL_CONFIG;
-        info.info.global_conf.hash_func = RTE_ETH_HASH_FUNCTION_TOEPLITZ;
-        if (rte_eth_dev_filter_ctrl(m_repid, RTE_ETH_FILTER_HASH,
-                                    RTE_ETH_FILTER_SET, &info) < 0) {
-            printf(" ERROR cannot set hash function on a port %d \n",m_repid);
-            exit(1);
-        }
-    }
     /* set reta_mask, for now it is ok to set one value to all ports */
     uint8_t reta_mask=(uint8_t)(min(dev_info->reta_size,(uint16_t)256)-1);
     if (CGlobalInfo::m_options.m_reta_mask==0){
@@ -6142,6 +6144,7 @@ COLD_FUNC int  update_dpdk_args(void){
     SET_ARGS((char *)"xx");
     CPreviewMode *lpp=&lpop->preview;
 
+#if 0
     if ( lpp->get_bnxt_so_mode() ){
         std::string &bnxt_so_str = get_bnxt_so_string();
         bnxt_so_str = "libbnxt-64" + std::string(g_image_postfix) + ".so";
@@ -6155,6 +6158,7 @@ COLD_FUNC int  update_dpdk_args(void){
         SET_ARGS("-d");
         SET_ARGS(ntacc_so_str.c_str());
     }
+#endif
 
     if ( lpp->get_mlx5_so_mode() ){
         std::string &mlx5_so_str = get_mlx5_so_string();
@@ -6200,7 +6204,7 @@ COLD_FUNC int  update_dpdk_args(void){
         SET_ARGS(g_loglevel_str);
     }
 
-    SET_ARGS("--master-lcore");
+    SET_ARGS("--main-lcore");
 
     snprintf(g_master_id_str, sizeof(g_master_id_str), "%u", lpsock->get_master_phy_id());
     SET_ARGS(g_master_id_str);
@@ -6230,7 +6234,7 @@ COLD_FUNC int  update_dpdk_args(void){
 
         for (int i=0; i<(int)dif.size(); i++) {
             if ( dif[i] != "dummy" ) {
-                SET_ARGS("-w");
+                SET_ARGS("-a");
                 /* dpdk devargs */
                 for (std::string &opts : cg->m_dpdk_devargs) {
                     dif[i] += "," + opts;
@@ -6597,8 +6601,8 @@ COLD_FUNC int main_test(int argc , char * argv[]){
     }
 
     if ( CGlobalInfo::m_options.preview.getOnlyLatency() ){
-        rte_eal_mp_remote_launch(latency_one_lcore, NULL, CALL_MASTER);
-        RTE_LCORE_FOREACH_SLAVE(lcore_id) {
+        rte_eal_mp_remote_launch(latency_one_lcore, NULL, CALL_MAIN);
+        RTE_LCORE_FOREACH_WORKER(lcore_id) {
             if (rte_eal_wait_lcore(lcore_id) < 0)
                 return -1;
         }
@@ -6613,8 +6617,8 @@ COLD_FUNC int main_test(int argc , char * argv[]){
         return (0);
     }
 
-    rte_eal_mp_remote_launch(slave_one_lcore, NULL, CALL_MASTER);
-    RTE_LCORE_FOREACH_SLAVE(lcore_id) {
+    rte_eal_mp_remote_launch(slave_one_lcore, NULL, CALL_MAIN);
+    RTE_LCORE_FOREACH_WORKER(lcore_id) {
         if (rte_eal_wait_lcore(lcore_id) < 0)
             return -1;
     }
@@ -6945,7 +6949,7 @@ COLD_FUNC int TrexDpdkPlatformApi::add_rx_flow_stat_rule(uint8_t port_id, uint16
     }
     CPhyEthIF * lp=g_trex.m_ports[port_id];
 
-    return get_ex_drv()->add_del_rx_flow_stat_rule(lp, RTE_ETH_FILTER_ADD, l3_type, l4_proto, ipv6_next_h, id);
+    return get_ex_drv()->add_del_rx_flow_stat_rule(lp, TREX_RTE_ETH_FILTER_ADD, l3_type, l4_proto, ipv6_next_h, id);
 }
 
 COLD_FUNC int TrexDpdkPlatformApi::del_rx_flow_stat_rule(uint8_t port_id, uint16_t l3_type, uint8_t l4_proto
@@ -6956,8 +6960,7 @@ COLD_FUNC int TrexDpdkPlatformApi::del_rx_flow_stat_rule(uint8_t port_id, uint16
 
     CPhyEthIF * lp=g_trex.m_ports[port_id];
 
-
-    return get_ex_drv()->add_del_rx_flow_stat_rule(lp, RTE_ETH_FILTER_DELETE, l3_type, l4_proto, ipv6_next_h, id);
+    return get_ex_drv()->add_del_rx_flow_stat_rule(lp, TREX_RTE_ETH_FILTER_DELETE, l3_type, l4_proto, ipv6_next_h, id);
 }
 
 COLD_FUNC int TrexDpdkPlatformApi::get_active_pgids(flow_stat_active_t_new &result) const {
